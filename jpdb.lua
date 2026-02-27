@@ -808,6 +808,8 @@ local function on_subtitle_change(_, new_text)
     popup_buttons = {}
     subtitle_regions = {}
     render_popup()
+    -- NOTE: do NOT call jpdb_resume() here! Resume only via close_popup() or user action.
+    -- Resuming here caused a rapid-fire subtitle cycle that blanked the display.
     -- NOTE: Do NOT call render_subtitles() here — keep old subtitle visible
     -- until the async parse for the new text completes.
 
@@ -1033,6 +1035,9 @@ local function handle_left_click(event)
         local btn = find_hovered_button(mx, my)
         if btn then
             dispatch_button(btn)
+            -- Auto-close popup and resume after action
+            close_popup()
+            toggle_click_bindings(false)
             return
         end
         -- Clicked outside buttons — dismiss popup, resume, unbind click
