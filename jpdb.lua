@@ -52,7 +52,7 @@ end)
 -- ─── Configuration ──────────────────────────────────────────────────────────
 
 local SERVER_URL   = 'http://127.0.0.1:9726'
-local POPUP_WIDTH  = 480  -- popup panel width in OSD pixels
+local POPUP_WIDTH  = 400  -- popup panel width in OSD pixels
 local POPUP_MAX_H  = 500  -- max popup height
 local FONT_FAMILY  = 'Yu Gothic UI'  -- popup font (supports Japanese/CJK)
 
@@ -441,16 +441,18 @@ local function get_pos_label(pos_list)
     return table.concat(labels, ', ')
 end
 
--- Button color map (BGR for ASS)
+-- Review button colors (BGR format, carefully chosen for dark background readability)
 local BTN_COLORS = {
-    add          = { bg = '&H4B4B4B&', hover = '&H606060&' },
-    blacklist    = { bg = '&H555555&', hover = '&H6A6A6A&' },
-    ['never-forget'] = { bg = '&H006A40&', hover = '&H008050&' },
-    nothing      = { bg = '&H0000CC&', hover = '&H0000FF&' },
-    something    = { bg = '&H0000CC&', hover = '&H0000FF&' },
-    hard         = { bg = '&H003FBF&', hover = '&H004DFF&' },
-    good         = { bg = '&H006A40&', hover = '&H008050&' },
-    easy         = { bg = '&H4B2B00&', hover = '&H5E3600&' },
+    -- utility row (muted/neutral)
+    add           = { bg = '&H484848&', hover = '&H5E5E5E&' },
+    blacklist     = { bg = '&H383838&', hover = '&H505050&' },
+    ['never-forget'] = { bg = '&H20532A&', hover = '&H287034&' },
+    -- review row (vibrant, color-coded by outcome)
+    nothing       = { bg = '&H1616BB&', hover = '&H2020D8&' },  -- red
+    something     = { bg = '&H1855CC&', hover = '&H2069E0&' },  -- orange
+    hard          = { bg = '&H2085AA&', hover = '&H28A0C8&' },  -- amber/teal
+    good          = { bg = '&H207828&', hover = '&H289630&' },  -- green
+    easy          = { bg = '&H885018&', hover = '&HA06020&' },  -- purple-gold
 }
 
 local hovered_button = nil  -- key of currently hovered button
@@ -490,36 +492,37 @@ local function render_popup()
     local state = get_primary_state(card.state)
     local color = STATE_COLORS[state] or '&HFFFFFF&'
 
-    -- ── Pass 1: compute content height (relative y from 0) ───────────────
-    local content_h = 16  -- top padding
-    content_h = content_h + 34  -- header
-    content_h = content_h + 22  -- state badges
+    -- ── Pass 1: pre-compute content height ───────────────────────────────
+    local PAD   = 14   -- horizontal inner padding
+    local LBAR  = 5    -- left accent bar width
+    local content_h = 14 + 40 + 6  -- top pad + word line + gap
+    if card.spelling ~= card.reading then
+        content_h = content_h + 26  -- reading line
+    end
+    content_h = content_h + 20  -- state badge line
     if card.frequencyRank then content_h = content_h + 20 end
-    content_h = content_h + 9   -- separator + gap
-    -- Meanings
+    content_h = content_h + 12  -- section gap before meanings
     local n_meanings = 0
     local last_pos_pass1 = nil
     for _, m in ipairs(card.meanings or {}) do
-        if n_meanings >= 6 then break end
+        if n_meanings >= 5 then break end
         local pl = get_pos_label(m.partOfSpeech)
         if pl ~= '' and pl ~= last_pos_pass1 then
             content_h = content_h + 18
             last_pos_pass1 = pl
         end
-        content_h = content_h + 20
+        content_h = content_h + 22
         n_meanings = n_meanings + 1
     end
-    content_h = content_h + 15   -- gap + separator
-    content_h = content_h + 26 + 5  -- mine buttons row
-    content_h = content_h + 26 + 10 -- review buttons row
-    content_h = content_h + 16  -- bottom padding
+    content_h = content_h + 12  -- gap before buttons
+    content_h = content_h + 28 + 6  -- action row + gap
+    content_h = content_h + 32 + 12 -- review row + bottom padding
 
-    -- ── Compute popup position: bottom-anchored above subtitle ───────────
+    -- ── Compute popup position ────────────────────────────────────────────
     local layout = subtitle_layout()
-    local popup_gap = 12  -- tight gap between popup bottom and subtitle top
-    local py = math.max(10, layout.sub_text_top - popup_gap - content_h)
+    local py = math.max(10, layout.sub_text_top - 10 - content_h)
 
-    -- Popup x: centered on the hovered word, NOT the mouse cursor
+    -- Center popup on the hovered word; clamp to screen edges
     local tok_center_x = hover_x
     for _, region in ipairs(subtitle_regions) do
         if region.token == popup_token then
@@ -529,54 +532,60 @@ local function render_popup()
     end
     local px = math.max(10, math.min(tok_center_x - POPUP_WIDTH / 2, osd_w - POPUP_WIDTH - 10))
 
-    -- ── Pass 2: build actual content at final position ───────────────────
+    -- ── Pass 2: draw everything ───────────────────────────────────────────
     local ev     = {}
-    local text_x = px + 16
-    local cur_y  = py + 16
+    local text_x = px + LBAR + PAD   -- text inset (past accent bar + padding)
+    local cur_y  = py + 14
 
-    -- Header
-    local header = ass_escape(card.spelling)
+    -- Word / kanji (large, bold, card state color)
+    ass_text(ev, text_x, cur_y, FONT_FAMILY, 34, true, color, '&H00&',
+        ass_escape(card.spelling))
+    cur_y = cur_y + 40
+
+    -- Reading (hiragana) — only if different from spelling
     if card.spelling ~= card.reading then
-        header = header .. '  (' .. ass_escape(card.reading) .. ')'
+        ass_text(ev, text_x, cur_y, FONT_FAMILY, 18, false, '&HBBBBCC&', '&H00&',
+            ass_escape(card.reading))
+        cur_y = cur_y + 26
     end
-    ass_text(ev, text_x, cur_y, FONT_FAMILY, 28, true, color, '&H00&', header)
-    cur_y = cur_y + 34
 
-    -- State badges
+    -- State badges  (e.g. "● new", "● learning")
     local badge_x = text_x
     for _, s in ipairs(card.state) do
-        local sc = STATE_COLORS[s] or '&H888888&'
-        ass_text(ev, badge_x, cur_y, FONT_FAMILY, 14, false, sc, '&H00&', '● ' .. ass_escape(s))
-        badge_x = badge_x + (utf8_len(s) * 10 + 32)
+        local sc = STATE_COLORS[s] or '&H999999&'
+        ass_text(ev, badge_x, cur_y, FONT_FAMILY, 13, false, sc, '&H00&',
+            '● ' .. ass_escape(s))
+        badge_x = badge_x + (utf8_len(s) * 9 + 28)
     end
-    cur_y = cur_y + 22
+    cur_y = cur_y + 20
 
-    -- Frequency rank
+    -- Frequency rank (right-aligned look — just append after badges)
     if card.frequencyRank then
-        ass_text(ev, text_x, cur_y, FONT_FAMILY, 14, false, '&HAAAAAA&', '&H00&',
-            'Top ' .. tostring(card.frequencyRank))
+        ass_text(ev, text_x, cur_y, FONT_FAMILY, 13, false, '&H8888AA&', '&H00&',
+            'freq #' .. tostring(card.frequencyRank))
         cur_y = cur_y + 20
     end
 
-    -- Separator
-    ass_rect(ev, px + 8, cur_y, POPUP_WIDTH - 16, 1, '&H555555&', '&H00&')
-    cur_y = cur_y + 8
+    cur_y = cur_y + 12  -- breathe before meanings
 
-    -- Meanings
+    -- ── Meanings ─────────────────────────────────────────────────────────
     local shown    = 0
     local last_pos = nil
     for i, m in ipairs(card.meanings or {}) do
-        if shown >= 6 then break end
+        if shown >= 5 then break end
         local pos_label = get_pos_label(m.partOfSpeech)
         if pos_label ~= '' and pos_label ~= last_pos then
-            ass_text(ev, text_x, cur_y, FONT_FAMILY, 13, true, '&H888888&', '&H00&', pos_label)
+            -- Part-of-speech label: small, muted, italic-style
+            ass_text(ev, text_x, cur_y, FONT_FAMILY, 12, false, '&H8899BB&', '&H00&',
+                pos_label)
             cur_y    = cur_y + 18
             last_pos = pos_label
         end
         local gloss = table.concat(m.glosses or {}, '; ')
-        if utf8_len(gloss) > 48 then
+        -- Trim long glosses to 46 chars so they stay on one line
+        if utf8_len(gloss) > 46 then
             local b, n = 1, 0
-            while b <= #gloss and n < 48 do
+            while b <= #gloss and n < 46 do
                 local byte = gloss:byte(b)
                 if byte < 0x80 then b = b + 1
                 elseif byte < 0xE0 then b = b + 2
@@ -584,30 +593,34 @@ local function render_popup()
                 else b = b + 4 end
                 n = n + 1
             end
-            gloss = gloss:sub(1, b - 1) .. '...'
+            gloss = gloss:sub(1, b - 1) .. '…'
         end
-        ass_text(ev, text_x + 8, cur_y, FONT_FAMILY, 15, false, '&HEEEEEE&', '&H00&',
-            i .. '. ' .. ass_escape(gloss))
-        cur_y = cur_y + 20
+        -- Alternating row shading for readability
+        local txt_color = (i % 2 == 1) and '&HEEEEEE&' or '&HCCCCCC&'
+        ass_text(ev, text_x + 4, cur_y, FONT_FAMILY, 15, false, txt_color, '&H00&',
+            i .. '.  ' .. ass_escape(gloss))
+        cur_y = cur_y + 22
         shown = shown + 1
     end
 
-    cur_y = cur_y + 6
+    cur_y = cur_y + 12  -- breathe before buttons
 
-    -- Separator
-    ass_rect(ev, px + 8, cur_y, POPUP_WIDTH - 16, 1, '&H555555&', '&H00&')
-    cur_y = cur_y + 8
-
-    -- Buttons
-    local bh = 26
+    -- ── Action row (Add / Blacklist / Never-Forget) ───────────────────────
+    local bh_action = 28
+    local bh_review = 32
     local gap = 5
 
-    local function draw_button(label, key, action, args, bx, by, bw)
+    local function draw_button(label, key, action, args, bx, by, bw, bh)
         local is_hov = (hovered_button == key)
-        local c = BTN_COLORS[key] or { bg = '&H333333&', hover = '&H555555&' }
+        local c = BTN_COLORS[key] or { bg = '&H383838&', hover = '&H505050&' }
         local bg = is_hov and c.hover or c.bg
         ass_rect(ev, bx, by, bw, bh, bg, '&H00&')
-        ass_text_center(ev, bx + bw / 2, by + bh / 2, FONT_FAMILY, 13, false, '&HFFFFFF&', '&H00&', label)
+        -- Subtle highlight on top edge for 3D feel
+        if is_hov then
+            ass_rect(ev, bx, by, bw, 1, '&HFFFFFF&', '&HCC&')
+        end
+        local label_color = '&HFFFFFF&'
+        ass_text_center(ev, bx + bw / 2, by + bh / 2, FONT_FAMILY, 13, false, label_color, '&H00&', label)
         table.insert(popup_buttons, { x1=bx, y1=by, x2=bx+bw, y2=by+bh, key=key, action=action, args=args })
     end
 
@@ -617,42 +630,58 @@ local function render_popup()
         if s == 'never-forget' then never_forgott = true end
     end
 
-    -- Mine row
-    local mw = math.floor((POPUP_WIDTH - 32 - gap * 2) / 3)
-    local bx = px + 16
-    draw_button('Add to Deck', 'add', 'mine', {}, bx, cur_y, mw)
+    -- Action row (3 buttons)
+    local mw = math.floor((POPUP_WIDTH - LBAR - PAD * 2 - gap * 2) / 3)
+    local bx = px + LBAR + PAD
+    draw_button('+ Add to Deck',  'add',           'mine',     {}, bx, cur_y, mw, bh_action)
     bx = bx + mw + gap
-    draw_button(blacklisted and 'Un-Blacklist' or 'Blacklist', 'blacklist', 'set-flag',
-        { flag = 'blacklist', state = not blacklisted }, bx, cur_y, mw)
+    draw_button(blacklisted  and 'Un-Blacklist'  or 'Blacklist',    'blacklist',     'set-flag',
+        { flag='blacklist',     state=not blacklisted  }, bx, cur_y, mw, bh_action)
     bx = bx + mw + gap
-    draw_button(never_forgott and 'Un-NF' or 'Never Forget', 'never-forget', 'set-flag',
-        { flag = 'never-forget', state = not never_forgott }, bx, cur_y, mw)
-    cur_y = cur_y + bh + gap
+    draw_button(never_forgott and 'Un-NF'        or 'Never Forget', 'never-forget',  'set-flag',
+        { flag='never-forget',  state=not never_forgott }, bx, cur_y, mw, bh_action)
+    cur_y = cur_y + bh_action + gap
 
-    -- Review row
-    local rw = math.floor((POPUP_WIDTH - 32 - gap * 4) / 5)
-    bx = px + 16
-    for _, b in ipairs({ {'Nothing','nothing'}, {'Something','something'}, {'Hard','hard'}, {'Good','good'}, {'Easy','easy'} }) do
-        draw_button(b[1], b[2], 'review', { rating = b[2] }, bx, cur_y, rw)
+    -- Review row (5 buttons, color-coded by outcome)
+    local rw = math.floor((POPUP_WIDTH - LBAR - PAD * 2 - gap * 4) / 5)
+    bx = px + LBAR + PAD
+    -- Labels include a tiny emoji-like indicator for quick scanning
+    for _, b in ipairs({
+        {'Nothing',   'nothing'},
+        {'Something', 'something'},
+        {'Hard',      'hard'},
+        {'Good',      'good'},
+        {'Easy',      'easy'},
+    }) do
+        draw_button(b[1], b[2], 'review', { rating=b[2] }, bx, cur_y, rw, bh_review)
         bx = bx + rw + gap
     end
-    cur_y = cur_y + bh + 10
+    cur_y = cur_y + bh_review + 12  -- bottom padding
 
-    -- ── Background (drawn first, layered behind content) ─────────────────
+    -- ── Build background (drawn FIRST so content is on top) ───────────────
     local actual_h = cur_y - py
     local all_ev   = {}
 
-    ass_rect(all_ev, px + 3, py + 3, POPUP_WIDTH, actual_h, '&H000000&', '&H70&')   -- shadow
-    ass_rect(all_ev, px, py, POPUP_WIDTH, actual_h, '&H141414&', '&H08&')             -- panel
-    ass_rect(all_ev, px, py, POPUP_WIDTH, 3, color, '&H00&')                          -- accent bar
+    -- Drop shadow
+    ass_rect(all_ev, px + 4, py + 4, POPUP_WIDTH, actual_h, '&H000000&', '&H88&')
+    -- Main dark panel (fully opaque)
+    ass_rect(all_ev, px, py, POPUP_WIDTH, actual_h, '&H0E0E16&', '&H00&')
+    -- Left accent bar (card state color, full height)
+    ass_rect(all_ev, px, py, LBAR, actual_h, color, '&H00&')
+    -- Subtle top border (slightly lighter than bg for definition)
+    ass_rect(all_ev, px, py, POPUP_WIDTH, 1, '&H3A3A4A&', '&H00&')
+    -- Header area background (slightly lighter to create section separation)
+    local header_h = (card.spelling ~= card.reading and 14+40+26 or 14+40) + 20
+    ass_rect(all_ev, px + LBAR, py, POPUP_WIDTH - LBAR, header_h, '&H16161E&', '&H00&')
 
+    -- Stack background then content
     for _, e in ipairs(ev) do table.insert(all_ev, e) end
 
     popup_osd.data = table.concat(all_ev, '\n')
     popup_osd:update()
 
-    dlog(string.format('render_popup px=%d py=%d h=%d bottom=%d sub_top=%d gap=%d',
-        px, py, actual_h, py + actual_h, layout.sub_text_top, layout.sub_text_top - (py + actual_h)))
+    dlog(string.format('render_popup px=%d py=%d h=%d | sub_text_top=%d gap=%d',
+        px, py, actual_h, layout.sub_text_top, layout.sub_text_top - (py + actual_h)))
 end
 
 
