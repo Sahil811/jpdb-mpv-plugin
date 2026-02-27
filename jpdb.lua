@@ -85,8 +85,10 @@ local hover_x          = 0
 local hover_y          = 0
 
 -- Stored pixel hit regions for subtitle tokens (populated when rendering)
--- Each entry: {x1, x2, y1, y2, token}
 local subtitle_regions = {}
+
+-- Pause/resume state — track if WE paused so we don't interfere with user's pause
+local jpdb_did_pause   = false
 
 -- Popup state
 local popup_visible    = false
@@ -216,6 +218,42 @@ local function utf8_byte_to_char(s, byte_pos)
     return n
 end
 
+-- Split a subtitle text into per-line info for multi-line hit region calculation.
+-- Each entry: { text, byte_start (0-based), chars_before }
+local function split_text_lines(text)
+    local result = {}
+    local i = 1            -- 1-indexed byte cursor
+    local line_start = 1   -- 1-indexed byte where this line starts
+    local chars_before = 0 -- character count before this line
+    while i <= #text do
+        local b = text:byte(i)
+        if b == 10 then  -- '\n'
+            local line_text = text:sub(line_start, i - 1)
+            table.insert(result, {
+                text         = line_text,
+                byte_start   = line_start - 1,  -- 0-based
+                chars_before = chars_before,
+            })
+            chars_before = chars_before + utf8_len(line_text) + 1  -- +1 for \n
+            line_start = i + 1
+            i = i + 1
+        else
+            if b < 0x80 then i = i + 1
+            elseif b < 0xE0 then i = i + 2
+            elseif b < 0xF0 then i = i + 3
+            else i = i + 4 end
+        end
+    end
+    -- Last (or only) line
+    local line_text = text:sub(line_start)
+    table.insert(result, {
+        text         = line_text,
+        byte_start   = line_start - 1,
+        chars_before = chars_before,
+    })
+    return result
+end
+
 -- ─── ASS helpers ────────────────────────────────────────────────────────────
 
 local function ass_color(color_hex, alpha_hex)
@@ -297,6 +335,20 @@ local function build_subtitle_ass(tokens, raw_text)
     return table.concat(parts)
 end
 
+-- Shared subtitle layout constants (used by both render_subtitles and popup positioning)
+local CHAR_PX     = 40   -- OSD units per CJK char at fs40
+local LINE_HEIGHT = 48   -- fs40 + line spacing (≈ 1.2 × CHAR_PX)
+
+local function subtitle_layout()
+    -- Returns {n_lines, sub_y_anchor, sub_text_top, lines_info}
+    -- sub_text_top: Y of the topmost subtitle pixel (for popup: popup must end above here)
+    local sub_y = osd_h - 60
+    local lines = split_text_lines(current_text)
+    local n     = #lines
+    local sub_text_top = sub_y - n * LINE_HEIGHT
+    return { n = n, sub_y = sub_y, sub_text_top = sub_text_top, lines = lines }
+end
+
 local function render_subtitles()
     if not sub_osd then return end
 
@@ -315,33 +367,45 @@ local function render_subtitles()
         return
     end
 
-    -- char_px: in OSD coordinate space, \fs40 gives ~40 OSD-units per CJK char
-    local char_px  = 40
-    local text_nch = utf8_len(current_text)          -- TRUE character count
-    local sub_x    = math.floor(osd_w / 2)
-    local sub_y    = osd_h - 60
-    local text_w   = text_nch * char_px
-    local sub_left = sub_x - text_w / 2
+    -- Build per-line hit regions (multi-line subtitle support)
+    local layout = subtitle_layout()
+    local sub_x  = math.floor(osd_w / 2)
 
-    -- Build pixel hit regions for each token using CHARACTER indices
-    for _, tok in ipairs(current_tokens) do
-        local ci_start = utf8_byte_to_char(current_text, tok.start)
-        local ci_end   = utf8_byte_to_char(current_text, tok['end'])
-        local x1 = math.floor(sub_left + ci_start * char_px)
-        local x2 = math.floor(sub_left + ci_end   * char_px)
-        local y1 = sub_y - char_px - 8   -- above baseline
-        local y2 = sub_y + 10            -- below baseline
-        table.insert(subtitle_regions, {
-            x1 = x1, x2 = x2, y1 = y1, y2 = y2, token = tok
-        })
+    for line_idx, ln in ipairs(layout.lines) do
+        -- Y: last line (idx=n) is at bottom (sub_y), earlier lines are above by LINE_HEIGHT each
+        local from_bottom  = layout.n - line_idx
+        local line_bottom  = layout.sub_y - from_bottom * LINE_HEIGHT
+        local y1 = line_bottom - CHAR_PX - 6
+        local y2 = line_bottom + 10
+
+        -- X: each line is individually centered
+        local line_nch  = utf8_len(ln.text)
+        local line_w    = line_nch * CHAR_PX
+        local line_left = sub_x - line_w / 2
+
+        -- Byte range of this line within the full text
+        local line_byte_start = ln.byte_start
+        local line_byte_end   = ln.byte_start + #ln.text
+
+        for _, tok in ipairs(current_tokens) do
+            if tok.start >= line_byte_start and tok['end'] <= line_byte_end + 1 then
+                -- Character position within this line
+                local ci_start = utf8_byte_to_char(current_text, tok.start) - ln.chars_before
+                local ci_end   = utf8_byte_to_char(current_text, tok['end']) - ln.chars_before
+                local x1 = math.floor(line_left + ci_start * CHAR_PX)
+                local x2 = math.floor(line_left + ci_end   * CHAR_PX)
+                table.insert(subtitle_regions, { x1=x1, x2=x2, y1=y1, y2=y2, token=tok })
+            end
+        end
     end
-    dlog(string.format('regions: %d sub_left=%.0f char_px=%d nch=%d osd=%dx%d',
-        #subtitle_regions, sub_left, char_px, text_nch, osd_w, osd_h))
+
+    dlog(string.format('regions=%d lines=%d sub_y=%d osd=%dx%d',
+        #subtitle_regions, layout.n, layout.sub_y, osd_w, osd_h))
 
     local a = assdraw.ass_new()
     a:new_event()
     a:append('{\\an2')
-    a:append('\\pos(' .. sub_x .. ',' .. sub_y .. ')')
+    a:append('\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')')
     a:append('\\fs40')
     a:append('\\bord2')
     a:append('\\shad1')
@@ -426,14 +490,22 @@ local function render_popup()
     local state = get_primary_state(card.state)
     local color = STATE_COLORS[state] or '&HFFFFFF&'
 
-    -- Popup x: centered on hover, clamped to screen
-    local px = math.max(10, math.min(hover_x - POPUP_WIDTH / 2, osd_w - POPUP_WIDTH - 10))
-    -- Popup y: above subtitle (subtitle is at bottom ~osd_h-60)
-    local py = math.max(10, (osd_h - 60) - POPUP_MAX_H - 20)
+    -- Popup y: just above the subtitle line.
+    -- Subtitle anchor is at osd_h-60. Estimate popup bottom = osd_h - 70.
+    -- We'll compute actual height below, then position accordingly.
+    -- For now use a fixed py and adjust if needed.
+    local sub_y_approx = osd_h - 60
+    -- We'll position so popup bottom is ~10px above subtitle top (sub_y - fs - 6)
+    local popup_bottom_target = sub_y_approx - 46
+    -- Estimate popup height: header+badges+freq+sep+6meanings+sep+2btnrows+padding ≈ 280px
+    local popup_h_estimate = 280
+    local py = math.max(10, popup_bottom_target - popup_h_estimate)
 
-    local ev      = {}  -- list of ASS event lines
-    local text_x  = px + 16
-    local cur_y   = py + 16
+    local px = math.max(10, math.min(hover_x - POPUP_WIDTH / 2, osd_w - POPUP_WIDTH - 10))
+
+    local ev     = {}  -- ASS event lines
+    local text_x = px + 16
+    local cur_y  = py + 16
 
     -- ── Header ───────────────────────────────────────────────────────────
     local header = ass_escape(card.spelling)
@@ -566,13 +638,24 @@ end
 -- Uses pixel regions stored during render_subtitles() for accurate hit detection.
 
 local function find_hovered_token(mx, my)
+    -- Use closest-center matching: find the token region whose CENTER X is
+    -- closest to the mouse X. This prevents jumpy behavior at token boundaries.
+    local best_tok  = nil
+    local best_dist = math.huge
     for _, region in ipairs(subtitle_regions) do
-        if mx >= region.x1 and mx <= region.x2 and
-           my >= region.y1 and my <= region.y2 then
-            return region.token
+        if my >= region.y1 and my <= region.y2 then
+            -- Check if mx is within region with a small tolerance
+            if mx >= region.x1 - 8 and mx <= region.x2 + 8 then
+                local center = (region.x1 + region.x2) / 2
+                local dist   = math.abs(mx - center)
+                if dist < best_dist then
+                    best_dist = dist
+                    best_tok  = region.token
+                end
+            end
         end
     end
-    return nil
+    return best_tok
 end
 
 -- ─── Button hit testing ──────────────────────────────────────────────────────
@@ -815,6 +898,35 @@ mp.observe_property('osd-height', 'number', function(_, h)
     render_popup()
 end)
 
+-- ─── Pause / resume helpers ─────────────────────────────────────────────────
+
+local function jpdb_pause()
+    if not jpdb_did_pause and not mp.get_property_bool('pause') then
+        mp.set_property_bool('pause', true)
+        jpdb_did_pause = true
+        dlog('paused for lookup')
+    end
+end
+
+local function jpdb_resume()
+    if jpdb_did_pause then
+        mp.set_property_bool('pause', false)
+        jpdb_did_pause = false
+        dlog('resumed after lookup')
+    end
+end
+
+local function close_popup()
+    popup_visible  = false
+    popup_token    = nil
+    popup_buttons  = {}
+    hovered_button = nil
+    hovered_token  = nil
+    render_popup()
+    render_subtitles()
+    jpdb_resume()
+end
+
 -- ─── Mouse tracking ──────────────────────────────────────────────────────────
 
 local mouse_timer = nil
@@ -830,9 +942,23 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
         local mx = hover_x
         local my = hover_y
 
-        local new_token = find_hovered_token(mx, my)
+        -- Interaction zone: from popup top down to below subtitle
+        -- Use same formula as popup py so zone matches popup exactly
+        local layout  = subtitle_layout()
+        local zone_y1 = math.max(10, layout.sub_text_top - 310)  -- popup top estimate
+        local zone_y2 = layout.sub_y + 20
+        local in_zone = (my >= zone_y1 and my <= zone_y2)
 
-        -- Update button hover highlight when popup is open
+        if not in_zone then
+            -- Mouse outside the zone: close popup if open, resume video
+            if popup_visible or hovered_token then
+                close_popup()
+            end
+            return
+        end
+
+        -- ── Inside interaction zone ──────────────────────────────────────
+        -- Update button hover highlight
         if popup_visible then
             local btn = find_hovered_button(mx, my)
             local new_key = btn and btn.key or nil
@@ -842,24 +968,23 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
             end
         end
 
-        -- Popup/hover state machine
+        -- Track which subtitle word the mouse is over
+        local new_token = find_hovered_token(mx, my)
+
         if new_token ~= hovered_token then
             hovered_token = new_token
-            render_subtitles()  -- update underline highlight
+            render_subtitles()  -- update underline
 
             if new_token then
-                -- Entered a word: open popup
+                -- Entered a word → pause video, open popup
+                jpdb_pause()
                 popup_token    = new_token
                 popup_visible  = true
                 hovered_button = nil
                 render_popup()
-            else
-                -- Left all words: close popup
-                popup_visible  = false
-                popup_token    = nil
-                popup_buttons  = {}
-                hovered_button = nil
-                render_popup()
+            elseif not popup_visible then
+                -- No word but still in zone and no popup open → do nothing
+                -- (popup stays open when mouse moves from word to popup buttons)
             end
         end
     end)
@@ -867,8 +992,7 @@ end)
 
 -- ─── Mouse clicks ────────────────────────────────────────────────────────────
 
--- Click is now ONLY for interacting with popup buttons.
--- Popup show/hide is driven by mouse hover above.
+-- Click is ONLY for interacting with popup buttons.
 mp.add_forced_key_binding('MBTN_LEFT', 'jpdb-click', function(event)
     if event and event.event ~= 'down' then return end
     local mx = hover_x
@@ -881,39 +1005,30 @@ mp.add_forced_key_binding('MBTN_LEFT', 'jpdb-click', function(event)
             dispatch_button(btn)
             return
         end
-        -- Clicked outside popup buttons — dismiss popup
-        popup_visible  = false
-        popup_token    = nil
-        popup_buttons  = {}
-        hovered_button = nil
-        render_popup()
+        -- Clicked outside buttons — dismiss popup and resume
+        close_popup()
     end
 end, { complex = true })
 
--- Also capture double-click to prevent mpv's fullscreen toggle when popup is shown
+-- Double-click: absorb if popup open, otherwise fullscreen toggle
 mp.add_forced_key_binding('MBTN_LEFT_DBL', 'jpdb-dbl-click', function()
-    -- When popup visible, absorb double-click (don't toggle fullscreen)
-    if popup_visible then
-        dlog('MBTN_LEFT_DBL absorbed (popup open)')
-        return
-    end
-    -- Otherwise pass through to default fullscreen toggle
+    if popup_visible then return end
     mp.command('cycle fullscreen')
 end)
--- Right click to close popup
+
+-- Right-click: close popup
 mp.add_forced_key_binding('MBTN_RIGHT', 'jpdb-close-popup', function()
-    if popup_visible then
-        popup_visible  = false
-        popup_token    = nil
-        popup_buttons  = {}
-        hovered_button = nil
-        render_popup()
-    end
+    if popup_visible then close_popup() end
 end)
 
 -- ─── Keyboard shortcuts ──────────────────────────────────────────────────────
 
--- Show/hide popup for hovered word (Shift key)
+-- ESC to close popup
+mp.add_key_binding('ESC', 'jpdb-esc', function()
+    if popup_visible then close_popup() end
+end)
+
+-- SPACE re-opens popup for hovered word without unpausing
 mp.add_key_binding('shift', 'jpdb-show-popup', function()
     if hovered_token and not popup_visible then
         popup_token    = hovered_token
@@ -921,11 +1036,7 @@ mp.add_key_binding('shift', 'jpdb-show-popup', function()
         hovered_button = nil
         render_popup()
     elseif popup_visible then
-        popup_visible  = false
-        popup_token    = nil
-        popup_buttons  = {}
-        hovered_button = nil
-        render_popup()
+        close_popup()
     end
 end)
 
