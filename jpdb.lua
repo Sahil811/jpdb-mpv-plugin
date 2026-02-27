@@ -490,18 +490,37 @@ local function render_popup()
     local state = get_primary_state(card.state)
     local color = STATE_COLORS[state] or '&HFFFFFF&'
 
-    -- Popup position: always strictly ABOVE the subtitle area
-    -- sub_text_top = top of topmost subtitle line pixel
-    -- popup bottom = sub_text_top - 30px gap → guaranteed never overlaps subtitle
-    local layout = subtitle_layout()
-    local popup_max_bottom = layout.sub_text_top - 30
-    -- Estimate popup height to set py; actual height computed as cur_y grows
-    local popup_h_est = math.min(popup_max_bottom - 10, 300)
-    local py = math.max(10, popup_max_bottom - popup_h_est)
+    -- ── Pass 1: compute content height (relative y from 0) ───────────────
+    local content_h = 16  -- top padding
+    content_h = content_h + 34  -- header
+    content_h = content_h + 22  -- state badges
+    if card.frequencyRank then content_h = content_h + 20 end
+    content_h = content_h + 9   -- separator + gap
+    -- Meanings
+    local n_meanings = 0
+    local last_pos_pass1 = nil
+    for _, m in ipairs(card.meanings or {}) do
+        if n_meanings >= 6 then break end
+        local pl = get_pos_label(m.partOfSpeech)
+        if pl ~= '' and pl ~= last_pos_pass1 then
+            content_h = content_h + 18
+            last_pos_pass1 = pl
+        end
+        content_h = content_h + 20
+        n_meanings = n_meanings + 1
+    end
+    content_h = content_h + 15   -- gap + separator
+    content_h = content_h + 26 + 5  -- mine buttons row
+    content_h = content_h + 26 + 10 -- review buttons row
+    content_h = content_h + 16  -- bottom padding
 
-    -- Popup x: calculate from the center of the token's hit region, NOT current mouse position.
-    -- This ensures the popup doesn't move when you move the mouse to click buttons!
-    local tok_center_x = hover_x -- fallback
+    -- ── Compute popup position: bottom-anchored above subtitle ───────────
+    local layout = subtitle_layout()
+    local popup_gap = 12  -- tight gap between popup bottom and subtitle top
+    local py = math.max(10, layout.sub_text_top - popup_gap - content_h)
+
+    -- Popup x: centered on the hovered word, NOT the mouse cursor
+    local tok_center_x = hover_x
     for _, region in ipairs(subtitle_regions) do
         if region.token == popup_token then
             tok_center_x = (region.x1 + region.x2) / 2
@@ -510,11 +529,12 @@ local function render_popup()
     end
     local px = math.max(10, math.min(tok_center_x - POPUP_WIDTH / 2, osd_w - POPUP_WIDTH - 10))
 
-    local ev     = {}  -- ASS event lines
+    -- ── Pass 2: build actual content at final position ───────────────────
+    local ev     = {}
     local text_x = px + 16
     local cur_y  = py + 16
 
-    -- ── Header ───────────────────────────────────────────────────────────
+    -- Header
     local header = ass_escape(card.spelling)
     if card.spelling ~= card.reading then
         header = header .. '  (' .. ass_escape(card.reading) .. ')'
@@ -538,11 +558,11 @@ local function render_popup()
         cur_y = cur_y + 20
     end
 
-    -- Separator line
+    -- Separator
     ass_rect(ev, px + 8, cur_y, POPUP_WIDTH - 16, 1, '&H555555&', '&H00&')
     cur_y = cur_y + 8
 
-    -- ── Meanings ─────────────────────────────────────────────────────────
+    -- Meanings
     local shown    = 0
     local last_pos = nil
     for i, m in ipairs(card.meanings or {}) do
@@ -555,7 +575,6 @@ local function render_popup()
         end
         local gloss = table.concat(m.glosses or {}, '; ')
         if utf8_len(gloss) > 48 then
-            -- trim to char limit
             local b, n = 1, 0
             while b <= #gloss and n < 48 do
                 local byte = gloss:byte(b)
@@ -575,11 +594,11 @@ local function render_popup()
 
     cur_y = cur_y + 6
 
-    -- Separator line
+    -- Separator
     ass_rect(ev, px + 8, cur_y, POPUP_WIDTH - 16, 1, '&H555555&', '&H00&')
     cur_y = cur_y + 8
 
-    -- ── Buttons ───────────────────────────────────────────────────────────
+    -- Buttons
     local bh = 26
     local gap = 5
 
@@ -619,25 +638,21 @@ local function render_popup()
     end
     cur_y = cur_y + bh + 10
 
-    -- ── Background (drawn first, before content) ──────────────────────────
+    -- ── Background (drawn first, layered behind content) ─────────────────
     local actual_h = cur_y - py
     local all_ev   = {}
 
-    -- Shadow
-    ass_rect(all_ev, px + 3, py + 3, POPUP_WIDTH, actual_h, '&H000000&', '&H70&')
-    -- Panel
-    ass_rect(all_ev, px, py, POPUP_WIDTH, actual_h, '&H141414&', '&H08&')
-    -- Accent bar
-    ass_rect(all_ev, px, py, POPUP_WIDTH, 3, color, '&H00&')
+    ass_rect(all_ev, px + 3, py + 3, POPUP_WIDTH, actual_h, '&H000000&', '&H70&')   -- shadow
+    ass_rect(all_ev, px, py, POPUP_WIDTH, actual_h, '&H141414&', '&H08&')             -- panel
+    ass_rect(all_ev, px, py, POPUP_WIDTH, 3, color, '&H00&')                          -- accent bar
 
-    -- Combine: backgrounds first, then content
     for _, e in ipairs(ev) do table.insert(all_ev, e) end
 
     popup_osd.data = table.concat(all_ev, '\n')
     popup_osd:update()
 
-    dlog(string.format('render_popup px=%d py=%d h=%d events=%d spelling=%s',
-        px, py, actual_h, #all_ev, tostring(card.spelling)))
+    dlog(string.format('render_popup px=%d py=%d h=%d bottom=%d sub_top=%d gap=%d',
+        px, py, actual_h, py + actual_h, layout.sub_text_top, layout.sub_text_top - (py + actual_h)))
 end
 
 
