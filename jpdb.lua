@@ -1,17 +1,17 @@
 --[[
-    jpdb.lua — JPDB MPV Plugin
-    
+    jpdb.lua — JPDB MPV Plugin  (UI/UX v2 — Google-level redesign)
+
     Features:
     - Color-coded Japanese subtitles based on jpdb vocabulary state
     - Interactive hover popup with word details (inside mpv, no browser)
     - Clickable review buttons: Nothing / Something / Hard / Good / Easy
     - Mine buttons: Add to deck, Blacklist, Never Forget
     - Keyboard shortcuts for all actions
-    
+
     Requirements:
     - server.js must be running: `node server.js`
     - config.json must have your jpdb API token set
-    
+
     Install: copy this file to your mpv scripts directory
       Windows: %APPDATA%\mpv\scripts\jpdb.lua
 ]]
@@ -22,7 +22,6 @@ local assdraw    = require('mp.assdraw')
 local utils      = require('mp.utils')
 
 -- ─── Debug log ───────────────────────────────────────────────────────────────
--- Log always goes to the plugin folder (writable, not Program Files)
 local LOG_PATH = 'D:/scripts/jpdb-mpv-plugin/jpdb-debug.log'
 
 local log_file = io.open(LOG_PATH, 'w')
@@ -44,132 +43,207 @@ local function dlog(...)
     msg.info(table.concat(parts, ' '))
 end
 
--- Show OSD confirmation so user knows the script loaded
 mp.add_timeout(0.5, function()
     mp.osd_message('[jpdb] Plugin loaded! server.js must be running.', 4)
 end)
 
 local SERVER_URL   = 'http://127.0.0.1:9726'
-local POPUP_WIDTH  = 560  -- ultra-wide for premium readability
-local POPUP_MAX_H  = 700  -- max popup height
-local FONT_FAMILY  = 'Yu Gothic UI'  -- popup font (supports Japanese/CJK)
+local FONT_FAMILY  = 'Yu Gothic UI'
 
--- Card state to ASS color (BGR order, &H<BB><GG><RR>&)
+-- ══════════════════════════════════════════════════════════════════════════════
+-- ─── Design System (Google Material You / dark video aesthetic) ───────────────
+-- ══════════════════════════════════════════════════════════════════════════════
+--
+--  All colors are ASS BGR hex: &HBBGGRR&
+--  Distances are in OSD units (1:1 pixel at default res)
+--
+--  Elevation model:
+--    bg_base    (#0D0D14) — deepest background
+--    bg_surface (#13131E) — popup panel surface
+--    bg_header  (#1A1A28) — header band (slightly lifted)
+--    bg_divider (#2A2A3E) — hairline dividers
+--    bg_btn     (#22223A) — neutral button resting
+--    bg_btn_hov (#30305A) — neutral button hover (4dp ripple tone)
+--
+--  Typography scale (fs):
+--    fs_kanji   60   bold   — primary word display
+--    fs_reading 26   normal — furigana / reading
+--    fs_pos     15   normal — part-of-speech chip
+--    fs_gloss   24   normal — English meaning
+--    fs_meta    16   normal — freq rank, state badges
+--    fs_btn     17   normal — button labels
+--
+--  Spacing grid: 8px base unit
+--    PAD_H  = 20   horizontal inner padding
+--    PAD_V  = 16   vertical inner padding (top/bottom)
+--    UNIT   = 8    grid unit
+
+local DS = {
+    -- Popup geometry
+    width       = 540,
+    radius      = 0,      -- ASS doesn't support rounded corners natively
+    lbar_w      = 6,      -- left accent bar (thinner, more refined)
+    pad_h       = 20,     -- horizontal inner content padding
+    pad_v       = 16,     -- vertical top/bottom padding
+    unit        = 8,      -- grid unit
+
+    -- Elevation colors (BGR)
+    bg_base     = '&H14130D&',   -- deep navy-black
+    bg_surface  = '&H1E1E13&',   -- card surface
+    bg_header   = '&H281E1A&',   -- header tint (warm)
+    bg_divider  = '&H3E3028&',   -- hairline
+    shadow_col  = '&H000000&',
+    shadow_al   = '&HA0&',
+
+    -- Button palette (BGR)
+    btn_neutral    = { bg = '&H302820&', hov = '&H484030&' },
+    btn_add        = { bg = '&H28382A&', hov = '&H3C5040&' },
+    btn_blacklist  = { bg = '&H28202A&', hov = '&H443040&' },
+    btn_nf         = { bg = '&H20382A&', hov = '&H305040&' },
+    btn_nothing    = { bg = '&H20207A&', hov = '&H3030A0&' },  -- deep red
+    btn_something  = { bg = '&H18408A&', hov = '&H2858B0&' },  -- orange
+    btn_hard       = { bg = '&H287898&', hov = '&H389AB8&' },  -- amber-teal
+    btn_good       = { bg = '&H207030&', hov = '&H309048&' },  -- green
+    btn_easy       = { bg = '&H704818&', hov = '&H906228&' },  -- purple-gold
+
+    -- Text colors (BGR)
+    col_white   = '&HFFFFFF&',
+    col_dim     = '&HBBBBCC&',   -- reading / secondary
+    col_muted   = '&H9999AA&',   -- meta labels
+    col_chip    = '&H8899BB&',   -- POS chip text
+    col_freq    = '&H7788AA&',   -- frequency label
+    col_divider = '&H5A5A78&',
+    col_shadow  = '&H000000&',
+
+    -- Typography
+    fs_kanji    = 56,
+    fs_reading  = 26,
+    fs_pos      = 15,
+    fs_gloss    = 23,
+    fs_meta     = 16,
+    fs_btn_act  = 16,   -- action row button label
+    fs_btn_rev  = 17,   -- review row button label
+    fs_shortcut = 13,   -- keyboard shortcut hint
+
+    -- Button heights (multiples of unit)
+    bh_action   = 36,   -- action row (Add/Blacklist/NF)
+    bh_review   = 44,   -- review row (Nothing…Easy)
+    btn_gap     = 6,    -- gap between buttons
+
+    -- Line heights
+    lh_kanji    = 64,
+    lh_reading  = 32,
+    lh_pos      = 22,
+    lh_gloss    = 30,   -- per wrapped gloss line
+    lh_meta     = 22,
+    lh_badge    = 24,
+
+    -- Divider height
+    divider_h   = 1,
+}
+
+-- Card state → ASS color (BGR)
 local STATE_COLORS = {
-    ['known']       = '&H00C070&',   -- green
-    ['never-forget']= '&H00C070&',   -- green
-    ['learning']    = '&H80A75E&',   -- teal
-    ['new']         = '&HFF8D4B&',   -- blue
-    ['not-in-deck'] = '&HFF8D4B&',   -- blue (will apply alpha)
-    ['due']         = '&H0045FF&',   -- orange-red
-    ['failed']      = '&H0000FF&',   -- red
-    ['locked']      = '&H777777&',   -- gray
-    ['suspended']   = '&H777777&',   -- gray
-    ['blacklisted'] = '&H777777&',   -- gray
-    ['redundant']   = '&HAAAAAA&',   -- light gray
+    ['known']       = '&H50C878&',   -- emerald green
+    ['never-forget']= '&H50C878&',   -- emerald green
+    ['learning']    = '&H78C8A0&',   -- mint teal
+    ['new']         = '&HE8A050&',   -- warm blue-ish (actually amber in RGB)
+    ['not-in-deck'] = '&HE8A050&',   -- amber (with alpha)
+    ['due']         = '&H3060FF&',   -- vivid red-orange
+    ['failed']      = '&H2020EE&',   -- vivid red
+    ['locked']      = '&H888898&',   -- cool gray
+    ['suspended']   = '&H888898&',
+    ['blacklisted'] = '&H888898&',
+    ['redundant']   = '&HAAAABC&',   -- lighter gray
 }
 
 local STATE_ALPHA = {
-    ['not-in-deck'] = '&H80&',  -- 50% opacity
+    ['not-in-deck'] = '&H88&',
+}
+
+-- State → short human label for badge
+local STATE_LABELS = {
+    ['known']        = 'Known',
+    ['never-forget'] = 'Never Forget',
+    ['learning']     = 'Learning',
+    ['new']          = 'New',
+    ['not-in-deck']  = 'Not in Deck',
+    ['due']          = 'Due',
+    ['failed']       = 'Failed',
+    ['locked']       = 'Locked',
+    ['suspended']    = 'Suspended',
+    ['blacklisted']  = 'Blacklisted',
+    ['redundant']    = 'Redundant',
 }
 
 -- ─── State ──────────────────────────────────────────────────────────────────
 
-local current_tokens   = {}    -- list of {card, start, end, length, rubies}
+local current_tokens   = {}
 local current_text     = ''
-local last_parsed_text = nil   -- guard against parse loop
-local hovered_token    = nil   -- currently hovered token
+local last_parsed_text = nil
+local hovered_token    = nil
 local hover_x          = 0
 local hover_y          = 0
-
--- Stored pixel hit regions for subtitle tokens (populated when rendering)
 local subtitle_regions = {}
-
--- Pause/resume state — track if WE paused so we don't interfere with user's pause
 local jpdb_did_pause   = false
 
--- Popup state
 local popup_visible    = false
-local popup_token      = nil   -- token the popup is showing
-local popup_osd        = nil   -- OSD overlay for popup
-local sub_osd          = nil   -- OSD overlay for color-coded subtitles
-
--- Button hit regions: list of {x1,y1,x2,y2, action, args}
+local popup_token      = nil
+local popup_osd        = nil
+local sub_osd          = nil
 local popup_buttons    = {}
+local hovered_button   = nil
 
--- OSD dimensions (updated on window resize)
 local osd_w = 1280
 local osd_h = 720
 
 -- ─── HTTP helpers ───────────────────────────────────────────────────────────
 
--- Synchronous HTTP POST using mpv's subprocess (curl)
 local function http_request(method, path, body_table)
     local body_json = body_table and utils.format_json(body_table) or ''
-
     local args = {
         'curl', '-s', '-X', method,
         '--max-time', '8',
         '-H', 'Content-Type: application/json',
         SERVER_URL .. path,
     }
-
     if body_json ~= '' then
         table.insert(args, '-d')
         table.insert(args, body_json)
     end
-
     local res = mp.command_native({
-        name = 'subprocess',
-        args = args,
-        capture_stdout = true,
-        capture_stderr = true,
-        playback_only = false,
+        name = 'subprocess', args = args,
+        capture_stdout = true, capture_stderr = true, playback_only = false,
     })
-
     dlog('http_request ' .. method .. ' ' .. path .. ' status=' .. tostring(res and res.status))
-
     if res.status ~= 0 then
-        dlog('curl failed: ' .. (res.stderr or 'unknown'))
         msg.error(string.format('[jpdb] curl failed (%d): %s', res.status, res.stderr or ''))
         return nil, 'curl failed: ' .. (res.stderr or 'unknown error')
     end
-
     local ok, data = pcall(utils.parse_json, res.stdout)
     if not ok or data == nil then
         msg.error('[jpdb] Failed to parse server response: ' .. (res.stdout or ''))
         return nil, 'bad JSON response'
     end
-
-    if data.error then
-        return nil, data.error
-    end
-
+    if data.error then return nil, data.error end
     return data, nil
 end
 
--- Async HTTP request (fire-and-forget for reviews/mines)
 local function http_request_async(method, path, body_table, on_done)
     local body_json = body_table and utils.format_json(body_table) or ''
-
     local args = {
         'curl', '-s', '-X', method,
         '--max-time', '15',
         '-H', 'Content-Type: application/json',
         SERVER_URL .. path,
     }
-
     if body_json ~= '' then
         table.insert(args, '-d')
         table.insert(args, body_json)
     end
-
     mp.command_native_async({
-        name = 'subprocess',
-        args = args,
-        capture_stdout = true,
-        capture_stderr = true,
-        playback_only = false,
+        name = 'subprocess', args = args,
+        capture_stdout = true, capture_stderr = true, playback_only = false,
     }, function(success, res, err)
         if not success or res.status ~= 0 then
             msg.error('[jpdb] Async request failed: ' .. (err or (res and res.stderr) or 'unknown'))
@@ -186,8 +260,6 @@ local function http_request_async(method, path, body_table, on_done)
 end
 
 -- ─── UTF-8 character utilities ───────────────────────────────────────────────
--- Lua's # operator returns UTF-8 BYTES, not characters.
--- CJK chars are 3 bytes each so we must count explicitly.
 
 local function utf8_len(s)
     local n, i = 0, 1
@@ -203,7 +275,6 @@ local function utf8_len(s)
 end
 
 local function utf8_byte_to_char(s, byte_pos)
-    -- Convert 0-based UTF-8 byte offset → 0-based character index
     local n, i = 0, 1
     while i <= byte_pos do
         local b = s:byte(i)
@@ -216,23 +287,21 @@ local function utf8_byte_to_char(s, byte_pos)
     return n
 end
 
--- Split a subtitle text into per-line info for multi-line hit region calculation.
--- Each entry: { text, byte_start (0-based), chars_before }
 local function split_text_lines(text)
     local result = {}
-    local i = 1            -- 1-indexed byte cursor
-    local line_start = 1   -- 1-indexed byte where this line starts
-    local chars_before = 0 -- character count before this line
+    local i = 1
+    local line_start = 1
+    local chars_before = 0
     while i <= #text do
         local b = text:byte(i)
-        if b == 10 then  -- '\n'
+        if b == 10 then
             local line_text = text:sub(line_start, i - 1)
             table.insert(result, {
                 text         = line_text,
-                byte_start   = line_start - 1,  -- 0-based
+                byte_start   = line_start - 1,
                 chars_before = chars_before,
             })
-            chars_before = chars_before + utf8_len(line_text) + 1  -- +1 for \n
+            chars_before = chars_before + utf8_len(line_text) + 1
             line_start = i + 1
             i = i + 1
         else
@@ -242,7 +311,6 @@ local function split_text_lines(text)
             else i = i + 4 end
         end
     end
-    -- Last (or only) line
     local line_text = text:sub(line_start)
     table.insert(result, {
         text         = line_text,
@@ -254,37 +322,42 @@ end
 
 -- ─── ASS helpers ────────────────────────────────────────────────────────────
 
-local function ass_color(color_hex, alpha_hex)
-    -- Returns ASS tags for primary color and optionally alpha
-    local a = alpha_hex or '&H00&'
-    return string.format('\\c%s\\1a%s', color_hex, a)
-end
-
 local function ass_escape(s)
     if not s then return '' end
     return s:gsub('\\', '\\\\'):gsub('{', '\\{'):gsub('}', '\\}'):gsub('\n', '\\N')
 end
 
--- Draw a filled rectangle in ASS drawing commands
-local function draw_rect(a, x1, y1, x2, y2)
-    a:new_event()
-    a:pos(0, 0)
-    a:an(7)
-    a:append(string.format('{\\bord0\\shad0\\p1}'))
-    a:append(string.format('m %d %d l %d %d %d %d %d %d',
-        x1, y1, x2, y1, x2, y2, x1, y2))
-    a:append('{\\p0}')
+-- Inline rectangle via \p1 drawing (no assdraw needed, faster)
+local function ass_rect(events, x, y, w, h, color, alpha)
+    if w <= 0 or h <= 0 then return end
+    table.insert(events, string.format(
+        '{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c%s\\1a%s\\p1}m 0 0 l %d 0 %d %d 0 %d{\\p0}',
+        x, y, color, alpha, w, w, h, h))
+end
+
+-- Thin separator line with gradient-like soft edges (two overlapping rects)
+local function ass_divider(events, x, y, w)
+    ass_rect(events, x, y, w, 1, DS.bg_divider, '&H00&')
+end
+
+local function ass_text(events, x, y, font, size, bold, color, alpha, text)
+    table.insert(events, string.format(
+        '{\\an7\\pos(%d,%d)\\fn%s\\fs%d\\b%d\\bord0\\shad0\\1c%s\\1a%s}%s',
+        x, y, font, size, bold and 1 or 0, color, alpha, ass_escape(text)))
+end
+
+local function ass_text_center(events, cx, cy, font, size, bold, color, alpha, text)
+    table.insert(events, string.format(
+        '{\\an5\\pos(%d,%d)\\fn%s\\fs%d\\b%d\\bord0\\shad0\\1c%s\\1a%s}%s',
+        cx, cy, font, size, bold and 1 or 0, color, alpha, ass_escape(text)))
 end
 
 -- ─── Get primary token state ─────────────────────────────────────────────────
 
 local function get_primary_state(card_state)
     if not card_state or #card_state == 0 then return 'not-in-deck' end
-    -- Prefer last element for redundant/locked combos
     for _, s in ipairs(card_state) do
-        if STATE_COLORS[s] then
-            return s
-        end
+        if STATE_COLORS[s] then return s end
     end
     return card_state[1] or 'not-in-deck'
 end
@@ -293,53 +366,39 @@ end
 
 local function build_subtitle_ass(tokens, raw_text)
     if not tokens or #tokens == 0 then return nil end
-
-    local ass    = assdraw.ass_new()
-    local parts  = {}
-    local last   = 0
-
-    -- Sort tokens by start position
+    local parts = {}
+    local last  = 0
     table.sort(tokens, function(a, b) return a.start < b.start end)
 
     for _, tok in ipairs(tokens) do
-        -- Characters before this token (unparsed — white)
         if tok.start > last then
             local pre = raw_text:sub(last + 1, tok.start)
             table.insert(parts, '{\\c&HFFFFFF&\\1a&H00&}' .. ass_escape(pre))
         end
-
         local state = get_primary_state(tok.card.state)
         local color = STATE_COLORS[state] or '&HFFFFFF&'
         local alpha = STATE_ALPHA[state]  or '&H00&'
-
-        -- Hover underline
-        local underline = ''
+        local tags  = '{\\c' .. color .. '\\1a' .. alpha
         if tok == hovered_token then
-            underline = '\\u1'
+            -- Use underline + slight brightness boost tag for hover
+            tags = tags .. '\\u1'
         end
-
+        tags = tags .. '}'
         local text_part = raw_text:sub(tok.start + 1, tok['end'])
-        table.insert(parts, string.format('{\\c%s\\1a%s%s}%s',
-                     color, alpha, underline, ass_escape(text_part)))
-
+        table.insert(parts, tags .. ass_escape(text_part))
         last = tok['end']
     end
 
-    -- Remainder text
     if last < #raw_text then
         table.insert(parts, '{\\c&HFFFFFF&\\1a&H00&}' .. ass_escape(raw_text:sub(last + 1)))
     end
-
     return table.concat(parts)
 end
 
--- Shared subtitle layout constants (used by both render_subtitles and popup positioning)
-local CHAR_PX     = 48   -- OSD units per CJK char at fs48 (20% larger than 40)
-local LINE_HEIGHT = 58   -- fs48 + line spacing (≈ 1.2 × CHAR_PX)
+local CHAR_PX     = 48
+local LINE_HEIGHT = 58
 
 local function subtitle_layout()
-    -- Returns {n_lines, sub_y_anchor, sub_text_top, lines_info}
-    -- Move subtitle anchor up to avoid mpv's default Bottom OSC (typically 40-80px tall)
     local sub_y = osd_h - 100
     local lines = split_text_lines(current_text)
     local n     = #lines
@@ -349,45 +408,32 @@ end
 
 local function render_subtitles()
     if not sub_osd then return end
-
-    subtitle_regions = {}  -- reset hit regions
-
+    subtitle_regions = {}
     if #current_tokens == 0 then
         sub_osd.data = ''
         sub_osd:update()
         return
     end
-
     local ass_content = build_subtitle_ass(current_tokens, current_text)
     if not ass_content then
         sub_osd.data = ''
         sub_osd:update()
         return
     end
-
-    -- Build per-line hit regions (multi-line subtitle support)
     local layout = subtitle_layout()
     local sub_x  = math.floor(osd_w / 2)
-
     for line_idx, ln in ipairs(layout.lines) do
-        -- Y: last line (idx=n) is at bottom (sub_y), earlier lines are above by LINE_HEIGHT each
-        local from_bottom  = layout.n - line_idx
-        local line_bottom  = layout.sub_y - from_bottom * LINE_HEIGHT
+        local from_bottom = layout.n - line_idx
+        local line_bottom = layout.sub_y - from_bottom * LINE_HEIGHT
         local y1 = line_bottom - CHAR_PX - 6
         local y2 = line_bottom + 10
-
-        -- X: each line is individually centered
         local line_nch  = utf8_len(ln.text)
         local line_w    = line_nch * CHAR_PX
         local line_left = sub_x - line_w / 2
-
-        -- Byte range of this line within the full text
         local line_byte_start = ln.byte_start
         local line_byte_end   = ln.byte_start + #ln.text
-
         for _, tok in ipairs(current_tokens) do
             if tok.start >= line_byte_start and tok['end'] <= line_byte_end + 1 then
-                -- Character position within this line
                 local ci_start = utf8_byte_to_char(current_text, tok.start) - ln.chars_before
                 local ci_end   = utf8_byte_to_char(current_text, tok['end']) - ln.chars_before
                 local x1 = math.floor(line_left + ci_start * CHAR_PX)
@@ -396,10 +442,8 @@ local function render_subtitles()
             end
         end
     end
-
     dlog(string.format('regions=%d lines=%d sub_y=%d osd=%dx%d',
         #subtitle_regions, layout.n, layout.sub_y, osd_w, osd_h))
-
     local a = assdraw.ass_new()
     a:new_event()
     a:append('{\\an2')
@@ -413,14 +457,16 @@ local function render_subtitles()
     sub_osd:update()
 end
 
--- ─── Popup rendering ─────────────────────────────────────────────────────────
+-- ══════════════════════════════════════════════════════════════════════════════
+-- ─── POPUP RENDERING  ─────────────────────────────────────────────────────────
+-- ══════════════════════════════════════════════════════════════════════════════
 
 local PARTS_OF_SPEECH = {
     n = 'Noun', pn = 'Pronoun', pref = 'Prefix', suf = 'Suffix',
-    name = 'Name', ['name-fem'] = 'Name (Feminine)', ['name-male'] = 'Name (Masculine)',
+    name = 'Name', ['name-fem'] = 'Feminine Name', ['name-male'] = 'Masculine Name',
     ['name-surname'] = 'Surname', ['name-person'] = 'Personal Name',
     ['name-place'] = 'Place Name', ['name-company'] = 'Company Name',
-    ['adj-i'] = 'Adjective', ['adj-na'] = 'な-Adjective', ['adj-no'] = 'の-Adjective',
+    ['adj-i'] = 'い-Adjective', ['adj-na'] = 'な-Adjective', ['adj-no'] = 'の-Adjective',
     ['adj-pn'] = 'Adjectival', adv = 'Adverb',
     aux = 'Auxiliary', ['aux-v'] = 'Auxiliary Verb', ['aux-adj'] = 'Auxiliary Adjective',
     conj = 'Conjunction', cop = 'Copula', ctr = 'Counter',
@@ -436,47 +482,52 @@ local function get_pos_label(pos_list)
     for _, p in ipairs(pos_list) do
         table.insert(labels, PARTS_OF_SPEECH[p] or p)
     end
-    return table.concat(labels, ', ')
+    return table.concat(labels, ' · ')
 end
 
--- Review button colors (BGR format, carefully chosen for dark background readability)
-local BTN_COLORS = {
-    -- utility row (muted/neutral)
-    add           = { bg = '&H484848&', hover = '&H5E5E5E&' },
-    blacklist     = { bg = '&H383838&', hover = '&H505050&' },
-    ['never-forget'] = { bg = '&H20532A&', hover = '&H287034&' },
-    -- review row (vibrant, color-coded by outcome)
-    nothing       = { bg = '&H1616BB&', hover = '&H2020D8&' },  -- red
-    something     = { bg = '&H1855CC&', hover = '&H2069E0&' },  -- orange
-    hard          = { bg = '&H2085AA&', hover = '&H28A0C8&' },  -- amber/teal
-    good          = { bg = '&H207828&', hover = '&H289630&' },  -- green
-    easy          = { bg = '&H885018&', hover = '&HA06020&' },  -- purple-gold
+-- Simple greedy word-wrap (English text, split on spaces)
+local function wrap_text(text, max_chars)
+    local lines = {}
+    local cur = {}
+    local cur_len = 0
+    for word in text:gmatch('%S+') do
+        local wl = utf8_len(word)
+        if cur_len > 0 and cur_len + 1 + wl > max_chars then
+            table.insert(lines, table.concat(cur, ' '))
+            cur = { word }
+            cur_len = wl
+        else
+            table.insert(cur, word)
+            cur_len = cur_len + (cur_len > 0 and 1 or 0) + wl
+        end
+    end
+    if #cur > 0 then
+        table.insert(lines, table.concat(cur, ' '))
+    end
+    return lines
+end
+
+-- Button color map
+local BTN_MAP = {
+    add            = DS.btn_add,
+    blacklist      = DS.btn_blacklist,
+    ['never-forget'] = DS.btn_nf,
+    nothing        = DS.btn_nothing,
+    something      = DS.btn_something,
+    hard           = DS.btn_hard,
+    good           = DS.btn_good,
+    easy           = DS.btn_easy,
 }
 
-local hovered_button = nil  -- key of currently hovered button
+-- ─── Keyboard shortcut labels for review buttons ─────────────────────────────
+local BTN_SHORTCUTS = {
+    nothing = '1', something = '2', hard = '3', good = '4', easy = '5',
+    add = 'A', blacklist = 'B', ['never-forget'] = 'N',
+}
 
-local function ass_rect(events, x, y, w, h, color, alpha)
-    -- Draw filled rectangle using \\p1 (1:1 OSD coordinate mapping)
-    -- Separate from assdraw to avoid scale=4 conflict
-    table.insert(events, string.format(
-        '{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c%s\\1a%s\\p1}m 0 0 l %d 0 %d %d 0 %d{\\p0}',
-        x, y, color, alpha, w, w, h, h))
-end
-
-local function ass_text(events, x, y, font, size, bold, color, alpha, text)
-    table.insert(events, string.format(
-        '{\\an7\\pos(%d,%d)\\fn%s\\fs%d\\b%d\\bord0\\shad0\\1c%s\\1a%s}%s',
-        x, y, font, size, bold and 1 or 0, color, alpha, ass_escape(text)))
-end
-
-local function ass_text_center(events, cx, cy, font, size, bold, color, alpha, text)
-    table.insert(events, string.format(
-        '{\\an5\\pos(%d,%d)\\fn%s\\fs%d\\b%d\\bord0\\shad0\\1c%s\\1a%s}%s',
-        cx, cy, font, size, bold and 1 or 0, color, alpha, ass_escape(text)))
-end
+-- ─────────────────────────────────────────────────────────────────────────────
 
 local function render_popup()
-
     if not popup_osd then return end
     if not popup_visible or not popup_token then
         popup_osd.data = ''
@@ -486,235 +537,261 @@ local function render_popup()
 
     popup_buttons = {}
 
-    local card  = popup_token.card
-    local state = get_primary_state(card.state)
-    local color = STATE_COLORS[state] or '&HFFFFFF&'
+    local card    = popup_token.card
+    local state   = get_primary_state(card.state)
+    local s_color = STATE_COLORS[state] or '&HFFFFFF&'
 
-    -- ── Pass 1: pre-compute content height ───────────────────────────────
-    local PAD   = 24   -- generous horizontal inner padding
-    local LBAR  = 8    -- left accent bar width
-    local MEANING_FS = 26 -- font size for English meanings
-    local MAX_CHARS_PER_LINE = 44 -- approximate max chars at fs 26 over 560px
-    
-    local function wrap_text(text, max_len)
-        local lines = {}
-        local current_line = {}
-        local current_len = 0
-        
-        -- Simple word wrap by spaces
-        for word in text:gmatch("%S+") do
-            local w_len = utf8_len(word)
-            if current_len + w_len + 1 > max_len and #current_line > 0 then
-                table.insert(lines, table.concat(current_line, " "))
-                current_line = {word}
-                current_len = w_len
-            else
-                table.insert(current_line, word)
-                current_len = current_len + w_len + (current_len > 0 and 1 or 0)
+    local W      = DS.width
+    local LB     = DS.lbar_w
+    local PAD    = DS.pad_h
+    local content_x = LB + PAD     -- left edge of text content
+
+    -- ── WRAP CONFIG ──────────────────────────────────────────────────────
+    -- At fs23 over (540 - 6 - 40) = 494px, roughly 42 chars fit
+    local WRAP_CHARS = 42
+
+    -- ── PASS 1: measure total height ─────────────────────────────────────
+    local function measure_h()
+        local h = DS.pad_v                  -- top padding
+
+        h = h + DS.lh_kanji                -- kanji line
+        if card.spelling ~= card.reading then
+            h = h + DS.lh_reading           -- reading line
+        end
+
+        -- State badges + frequency on same row
+        h = h + DS.lh_badge
+
+        h = h + DS.unit                     -- gap after header meta
+
+        -- Hairline divider
+        h = h + DS.divider_h + DS.unit
+
+        -- Meanings
+        local shown, last_pos = 0, nil
+        for _, m in ipairs(card.meanings or {}) do
+            if shown >= 6 then break end
+            local pl = get_pos_label(m.partOfSpeech)
+            if pl ~= '' and pl ~= last_pos then
+                h = h + DS.lh_pos           -- POS chip
+                last_pos = pl
             end
+            local gloss = table.concat(m.glosses or {}, '; ')
+            local lines = wrap_text(gloss, WRAP_CHARS)
+            h = h + #lines * DS.lh_gloss
+            shown = shown + 1
         end
-        if #current_line > 0 then
-            table.insert(lines, table.concat(current_line, " "))
-        end
-        return lines
+
+        h = h + DS.unit * 2                 -- breathe before buttons
+
+        -- Hairline divider before buttons
+        h = h + DS.divider_h + DS.unit
+
+        -- Action row + review row
+        h = h + DS.bh_action + DS.btn_gap
+        h = h + DS.bh_review
+
+        h = h + DS.pad_v                    -- bottom padding
+        return h
     end
 
-    local content_h = 20 + 60 + 10  -- top pad + word line + gap
-    if card.spelling ~= card.reading then
-        content_h = content_h + 34  -- reading line
-    end
-    content_h = content_h + 28  -- state badge line
-    if card.frequencyRank then content_h = content_h + 28 end
-    content_h = content_h + 20  -- section gap before meanings
-    local n_meanings = 0
-    local last_pos_pass1 = nil
-    for _, m in ipairs(card.meanings or {}) do
-        if n_meanings >= 5 then break end
-        local pl = get_pos_label(m.partOfSpeech)
-        if pl ~= '' and pl ~= last_pos_pass1 then
-            content_h = content_h + 26
-            last_pos_pass1 = pl
-        end
-        local gloss = table.concat(m.glosses or {}, '; ')
-        local wrapped_lines = wrap_text(gloss, MAX_CHARS_PER_LINE)
-        content_h = content_h + (#wrapped_lines * 38) -- 38px per line for fs 26
-        n_meanings = n_meanings + 1
-    end
-    content_h = content_h + 20  -- gap before buttons
-    content_h = content_h + 38 + 8  -- action row + gap
-    content_h = content_h + 46 + 20 -- review row + bottom padding
+    local total_h = measure_h()
 
-    -- ── Compute popup position ────────────────────────────────────────────
+    -- ── COMPUTE POSITION ─────────────────────────────────────────────────
+    -- Popup sits just above the subtitle block; never clips screen edges
     local layout = subtitle_layout()
-    local py = math.max(10, layout.sub_text_top - 10 - content_h)
+    local py = math.max(8, layout.sub_text_top - DS.unit - total_h)
 
-    -- Center popup on the hovered word; clamp to screen edges
-    local tok_center_x = hover_x
+    -- Center on the hovered word
+    local tok_cx = hover_x
     for _, region in ipairs(subtitle_regions) do
         if region.token == popup_token then
-            tok_center_x = (region.x1 + region.x2) / 2
+            tok_cx = (region.x1 + region.x2) / 2
             break
         end
     end
-    local px = math.max(10, math.min(tok_center_x - POPUP_WIDTH / 2, osd_w - POPUP_WIDTH - 10))
+    local px = math.max(8, math.min(tok_cx - W / 2, osd_w - W - 8))
 
-    -- ── Pass 2: draw everything ───────────────────────────────────────────
-    local ev     = {}
-    local text_x = px + LBAR + PAD   -- text inset (past accent bar + padding)
-    local cur_y  = py + 20
+    -- ── PASS 2: draw ─────────────────────────────────────────────────────
+    local bg_ev  = {}   -- drawn first (behind content)
+    local fg_ev  = {}   -- drawn on top
 
-    -- Word / kanji (large, bold, card state color)
-    ass_text(ev, text_x, cur_y, FONT_FAMILY, 56, true, color, '&H00&',
+    -- ── Drop shadow (two-layer for soft effect) ───────────────────────────
+    ass_rect(bg_ev, px + 6, py + 8, W, total_h, DS.shadow_col, '&HCC&')
+    ass_rect(bg_ev, px + 3, py + 4, W, total_h, DS.shadow_col, '&H88&')
+
+    -- ── Main surface ─────────────────────────────────────────────────────
+    ass_rect(bg_ev, px, py, W, total_h, DS.bg_surface, '&H00&')
+
+    -- ── Left accent bar (card-state color) ───────────────────────────────
+    ass_rect(bg_ev, px, py, LB, total_h, s_color, '&H00&')
+
+    -- ── Top border hairline ───────────────────────────────────────────────
+    ass_rect(bg_ev, px + LB, py, W - LB, 1, s_color, '&HC0&')
+
+    -- ── Header band (slightly lifted background) ──────────────────────────
+    local header_h = DS.pad_v + DS.lh_kanji
+    if card.spelling ~= card.reading then header_h = header_h + DS.lh_reading end
+    header_h = header_h + DS.lh_badge + DS.unit
+    ass_rect(bg_ev, px + LB, py, W - LB, header_h, DS.bg_header, '&H00&')
+
+    -- Cursor (drawing position, relative to popup top-left)
+    local cx = px + content_x
+    local cy = py + DS.pad_v
+
+    -- ── Kanji / Spelling ─────────────────────────────────────────────────
+    -- Large, bold, card-state color for instant visual recognition
+    ass_text(fg_ev, cx, cy, FONT_FAMILY, DS.fs_kanji, true, s_color, '&H00&',
         ass_escape(card.spelling))
-    cur_y = cur_y + 60
+    cy = cy + DS.lh_kanji
 
-    -- Reading (hiragana) — only if different from spelling
+    -- ── Reading (furigana) ───────────────────────────────────────────────
     if card.spelling ~= card.reading then
-        ass_text(ev, text_x, cur_y, FONT_FAMILY, 28, false, '&HBBBBCC&', '&H00&',
+        ass_text(fg_ev, cx, cy, FONT_FAMILY, DS.fs_reading, false, DS.col_dim, '&H00&',
             ass_escape(card.reading))
-        cur_y = cur_y + 34
+        cy = cy + DS.lh_reading
     end
 
-    -- State badges  (e.g. "● new", "● learning")
-    local badge_x = text_x
+    -- ── State badges + frequency (inline, compact) ───────────────────────
+    local badge_x = cx
     for _, s in ipairs(card.state) do
-        local sc = STATE_COLORS[s] or '&H999999&'
-        ass_text(ev, badge_x, cur_y, FONT_FAMILY, 18, false, sc, '&H00&',
-            '● ' .. ass_escape(s))
-        badge_x = badge_x + (utf8_len(s) * 12 + 36)
+        local sc = STATE_COLORS[s] or '&H888888&'
+        local label = STATE_LABELS[s] or s
+        -- Dot indicator + label
+        ass_text(fg_ev, badge_x, cy, FONT_FAMILY, DS.fs_meta, false, sc, '&H00&',
+            '● ' .. ass_escape(label))
+        badge_x = badge_x + utf8_len(label) * 10 + 30
     end
-    cur_y = cur_y + 28
 
-    -- Frequency rank (right-aligned look — just append after badges)
+    -- Frequency rank right-side (we place it after badges with a separator)
     if card.frequencyRank then
-        ass_text(ev, text_x, cur_y, FONT_FAMILY, 18, false, '&H8888AA&', '&H00&',
-            'freq #' .. tostring(card.frequencyRank))
-        cur_y = cur_y + 28
+        local freq_str = '  ·  #' .. tostring(card.frequencyRank)
+        ass_text(fg_ev, badge_x, cy, FONT_FAMILY, DS.fs_meta, false, DS.col_freq, '&H00&', freq_str)
     end
+    cy = cy + DS.lh_badge + DS.unit
 
-    cur_y = cur_y + 20  -- breathe before meanings
+    -- ── Divider ──────────────────────────────────────────────────────────
+    ass_divider(fg_ev, px + LB + 2, cy, W - LB - 4)
+    cy = cy + DS.divider_h + DS.unit
 
     -- ── Meanings ─────────────────────────────────────────────────────────
     local shown    = 0
     local last_pos = nil
     for i, m in ipairs(card.meanings or {}) do
-        if shown >= 5 then break end
+        if shown >= 6 then break end
         local pos_label = get_pos_label(m.partOfSpeech)
+
+        -- POS chip: small pill-style label (text-only, no box — keeps it clean)
         if pos_label ~= '' and pos_label ~= last_pos then
-            -- Part-of-speech label: small, muted, italic-style
-            ass_text(ev, text_x, cur_y, FONT_FAMILY, 16, false, '&H8899BB&', '&H00&',
-                pos_label)
-            cur_y    = cur_y + 26
+            ass_text(fg_ev, cx, cy, FONT_FAMILY, DS.fs_pos, false, DS.col_chip, '&H00&',
+                '▸ ' .. ass_escape(pos_label))
+            cy = cy + DS.lh_pos
             last_pos = pos_label
         end
-        local gloss = table.concat(m.glosses or {}, '; ')
-        local wrapped_lines = wrap_text(gloss, MAX_CHARS_PER_LINE)
-        
-        -- Pure white for maximum readability, no alternating dim colors
-        local txt_color = '&HFFFFFF&' 
-        
-        for line_idx, line_text in ipairs(wrapped_lines) do
-            local prefix = (line_idx == 1) and (i .. '.  ') or '    '
-            ass_text(ev, text_x + 6, cur_y, FONT_FAMILY, MEANING_FS, false, txt_color, '&H00&',
-                prefix .. ass_escape(line_text))
-            cur_y = cur_y + 38
+
+        local gloss   = table.concat(m.glosses or {}, '; ')
+        local wlines  = wrap_text(gloss, WRAP_CHARS)
+        -- Meaning number glyph in dim color, text in bright white
+        for li, wline in ipairs(wlines) do
+            local prefix = (li == 1) and (tostring(i) .. '.  ') or '    '
+            local text_col = (i % 2 == 0) and '&HE0E0F0&' or DS.col_white
+            ass_text(fg_ev, cx, cy, FONT_FAMILY, DS.fs_gloss, false, text_col, '&H00&',
+                ass_escape(prefix .. wline))
+            cy = cy + DS.lh_gloss
         end
         shown = shown + 1
     end
 
-    cur_y = cur_y + 20  -- breathe before buttons
+    cy = cy + DS.unit * 2
 
-    -- ── Action row (Add / Blacklist / Never-Forget) ───────────────────────
-    local bh_action = 38
-    local bh_review = 46
-    local gap = 8
+    -- ── Button section divider ────────────────────────────────────────────
+    ass_divider(fg_ev, px + LB + 2, cy, W - LB - 4)
+    cy = cy + DS.divider_h + DS.unit
 
-    local function draw_button(label, key, action, args, bx, by, bw, bh)
+    -- ── Helper: draw one button ───────────────────────────────────────────
+    local function draw_button(label, key, action, args, bx, by, bw, bh, fs)
         local is_hov = (hovered_button == key)
-        local c = BTN_COLORS[key] or { bg = '&H383838&', hover = '&H505050&' }
-        local bg = is_hov and c.hover or c.bg
-        ass_rect(ev, bx, by, bw, bh, bg, '&H00&')
-        -- Subtle highlight on top edge for 3D feel
+        local palette = BTN_MAP[key] or DS.btn_neutral
+        local bg      = is_hov and palette.hov or palette.bg
+
+        -- Button background
+        ass_rect(bg_ev, bx, by, bw, bh, bg, '&H00&')
+
+        -- Top-edge highlight for 3D lift (subtle)
         if is_hov then
-            ass_rect(ev, bx, by, bw, 1, '&HFFFFFF&', '&HCC&')
+            ass_rect(bg_ev, bx, by, bw, 1, DS.col_white, '&HDD&')
         end
-        local label_color = '&HFFFFFF&'
-        ass_text_center(ev, bx + bw / 2, by + bh / 2, FONT_FAMILY, 18, false, label_color, '&H00&', label)
-        table.insert(popup_buttons, { x1=bx, y1=by, x2=bx+bw, y2=by+bh, key=key, action=action, args=args })
+
+        -- Keyboard shortcut hint (small, top-right corner of button)
+        local sc = BTN_SHORTCUTS[key]
+        if sc then
+            ass_text(fg_ev, bx + bw - 14, by + 4,
+                FONT_FAMILY, DS.fs_shortcut, false, DS.col_muted, '&H00&', sc)
+        end
+
+        -- Button label (centered)
+        ass_text_center(fg_ev, bx + bw / 2, by + bh / 2,
+            FONT_FAMILY, fs or DS.fs_btn_act, false, DS.col_white, '&H00&', label)
+
+        table.insert(popup_buttons,
+            { x1=bx, y1=by, x2=bx+bw, y2=by+bh, key=key, action=action, args=args })
     end
 
+    -- ── Action row: Add / Blacklist / Never Forget ────────────────────────
     local blacklisted, never_forgott = false, false
     for _, s in ipairs(card.state) do
         if s == 'blacklisted'  then blacklisted  = true end
         if s == 'never-forget' then never_forgott = true end
     end
 
-    -- Action row (3 buttons)
-    local mw = math.floor((POPUP_WIDTH - LBAR - PAD * 2 - gap * 2) / 3)
-    local bx = px + LBAR + PAD
-    draw_button('+ Add to Deck',  'add',           'mine',     {}, bx, cur_y, mw, bh_action)
-    bx = bx + mw + gap
-    draw_button(blacklisted  and 'Un-Blacklist'  or 'Blacklist',    'blacklist',     'set-flag',
-        { flag='blacklist',     state=not blacklisted  }, bx, cur_y, mw, bh_action)
-    bx = bx + mw + gap
-    draw_button(never_forgott and 'Un-NF'        or 'Never Forget', 'never-forget',  'set-flag',
-        { flag='never-forget',  state=not never_forgott }, bx, cur_y, mw, bh_action)
-    cur_y = cur_y + bh_action + gap
+    local action_w = math.floor((W - LB - PAD * 2 - DS.btn_gap * 2) / 3)
+    local bx = px + content_x
+    draw_button('＋ Add to Deck',  'add',   'mine', {}, bx, cy, action_w, DS.bh_action)
+    bx = bx + action_w + DS.btn_gap
+    draw_button(blacklisted  and '✕ Un-Blacklist' or '⊘ Blacklist',
+        'blacklist', 'set-flag',
+        { flag='blacklist',    state=not blacklisted  }, bx, cy, action_w, DS.bh_action)
+    bx = bx + action_w + DS.btn_gap
+    draw_button(never_forgott and '★ Un-NF'  or '★ Never Forget',
+        'never-forget', 'set-flag',
+        { flag='never-forget', state=not never_forgott }, bx, cy, action_w, DS.bh_action)
+    cy = cy + DS.bh_action + DS.btn_gap
 
-    -- Review row (5 buttons, color-coded by outcome)
-    local rw = math.floor((POPUP_WIDTH - LBAR - PAD * 2 - gap * 4) / 5)
-    bx = px + LBAR + PAD
-    -- Labels include a tiny emoji-like indicator for quick scanning
-    for _, b in ipairs({
-        {'Nothing',   'nothing'},
-        {'Something', 'something'},
-        {'Hard',      'hard'},
-        {'Good',      'good'},
-        {'Easy',      'easy'},
-    }) do
-        draw_button(b[1], b[2], 'review', { rating=b[2] }, bx, cur_y, rw, bh_review)
-        bx = bx + rw + gap
+    -- ── Review row: Nothing / Something / Hard / Good / Easy ─────────────
+    local review_btns = {
+        { '✕ Nothing',   'nothing',   'nothing'   },
+        { '△ Something', 'something', 'something' },
+        { '▲ Hard',      'hard',      'hard'      },
+        { '✓ Good',      'good',      'good'      },
+        { '★ Easy',      'easy',      'easy'      },
+    }
+    local rev_w = math.floor((W - LB - PAD * 2 - DS.btn_gap * 4) / 5)
+    bx = px + content_x
+    for _, b in ipairs(review_btns) do
+        draw_button(b[1], b[2], 'review', { rating=b[3] }, bx, cy, rev_w, DS.bh_review, DS.fs_btn_rev)
+        bx = bx + rev_w + DS.btn_gap
     end
-    cur_y = cur_y + bh_review + 12  -- bottom padding
+    cy = cy + DS.bh_review + DS.pad_v
 
-    -- ── Build background (drawn FIRST so content is on top) ───────────────
-    local actual_h = cur_y - py
-    local all_ev   = {}
+    -- ── Assemble final OSD data ───────────────────────────────────────────
+    -- Merge bg then fg so content is always on top of backgrounds
+    local all = {}
+    for _, e in ipairs(bg_ev) do table.insert(all, e) end
+    for _, e in ipairs(fg_ev) do table.insert(all, e) end
 
-    -- Drop shadow
-    ass_rect(all_ev, px + 4, py + 4, POPUP_WIDTH, actual_h, '&H000000&', '&H88&')
-    -- Main dark panel (fully opaque)
-    ass_rect(all_ev, px, py, POPUP_WIDTH, actual_h, '&H0E0E16&', '&H00&')
-    -- Left accent bar (card state color, full height)
-    ass_rect(all_ev, px, py, LBAR, actual_h, color, '&H00&')
-    -- Subtle top border (slightly lighter than bg for definition)
-    ass_rect(all_ev, px, py, POPUP_WIDTH, 1, '&H3A3A4A&', '&H00&')
-    -- Header area background (slightly lighter to create section separation)
-    local header_h = (card.spelling ~= card.reading and 20+60+34 or 20+60) + 28
-    ass_rect(all_ev, px + LBAR, py, POPUP_WIDTH - LBAR, header_h, '&H16161E&', '&H00&')
-
-    -- Stack background then content
-    for _, e in ipairs(ev) do table.insert(all_ev, e) end
-
-    popup_osd.data = table.concat(all_ev, '\n')
+    popup_osd.data = table.concat(all, '\n')
     popup_osd:update()
 
-    dlog(string.format('render_popup px=%d py=%d h=%d | sub_text_top=%d gap=%d',
-        px, py, actual_h, layout.sub_text_top, layout.sub_text_top - (py + actual_h)))
+    dlog(string.format('render_popup px=%d py=%d h=%d btn_count=%d',
+        px, py, total_h, #popup_buttons))
 end
 
-
--- ─── Mouse position → subtitle token mapping ──────────────────────────────────────
--- Uses pixel regions stored during render_subtitles() for accurate hit detection.
+-- ─── Mouse position → subtitle token mapping ─────────────────────────────────
 
 local function find_hovered_token(mx, my)
-    -- Use closest-center matching: find the token region whose CENTER X is
-    -- closest to the mouse X. This prevents jumpy behavior at token boundaries.
-    local best_tok  = nil
-    local best_dist = math.huge
+    local best_tok, best_dist = nil, math.huge
     for _, region in ipairs(subtitle_regions) do
         if my >= region.y1 and my <= region.y2 then
-            -- Check if mx is within region with a small tolerance
             if mx >= region.x1 - 8 and mx <= region.x2 + 8 then
                 local center = (region.x1 + region.x2) / 2
                 local dist   = math.abs(mx - center)
@@ -746,33 +823,35 @@ local function show_toast(msg_text, duration_ms)
     mp.osd_message(msg_text, duration_ms / 1000)
 end
 
+local function refresh_after_action()
+    mp.add_timeout(0.1, function()
+        local res, _ = http_request('POST', '/parse', { text = current_text })
+        if res and res.tokens then
+            current_tokens = res.tokens
+            render_subtitles()
+            if popup_visible and popup_token then
+                for _, tok in ipairs(current_tokens) do
+                    if tok.card.vid == popup_token.card.vid and
+                       tok.card.sid == popup_token.card.sid then
+                        popup_token = tok
+                        break
+                    end
+                end
+                render_popup()
+            end
+        end
+    end)
+end
+
 local function do_review(card, rating)
     show_toast('Reviewing: ' .. rating .. '…')
-    http_request_async('POST', '/review', { vid = card.vid, sid = card.sid, rating = rating },
+    http_request_async('POST', '/review',
+        { vid = card.vid, sid = card.sid, rating = rating },
         function(data, err)
-            if err then
-                show_toast('Review failed: ' .. err)
+            if err then show_toast('Review failed: ' .. err)
             else
-                show_toast('Reviewed: ' .. rating)
-                -- Refresh parse to get updated state
-                mp.add_timeout(0.1, function()
-                    local res, e = http_request('POST', '/parse', { text = current_text })
-                    if res and res.tokens then
-                        current_tokens = res.tokens
-                        render_subtitles()
-                        if popup_visible and popup_token then
-                            -- Update popup token card state
-                            for _, tok in ipairs(current_tokens) do
-                                if tok.card.vid == popup_token.card.vid and
-                                   tok.card.sid == popup_token.card.sid then
-                                    popup_token = tok
-                                    break
-                                end
-                            end
-                            render_popup()
-                        end
-                    end
-                end)
+                show_toast('✓ Reviewed: ' .. rating)
+                refresh_after_action()
             end
         end)
 end
@@ -782,11 +861,8 @@ local function do_mine(card, sentence)
     http_request_async('POST', '/mine',
         { vid = card.vid, sid = card.sid, sentence = sentence or current_text },
         function(data, err)
-            if err then
-                show_toast('Mine failed: ' .. err)
-            else
-                show_toast('✓ Added: ' .. card.spelling)
-            end
+            if err then show_toast('Mine failed: ' .. err)
+            else show_toast('✓ Added: ' .. card.spelling) end
         end)
 end
 
@@ -796,37 +872,17 @@ local function do_set_flag(card, flag, state)
     http_request_async('POST', '/set-flag',
         { vid = card.vid, sid = card.sid, flag = flag, state = state },
         function(data, err)
-            if err then
-                show_toast('Flag failed: ' .. err)
+            if err then show_toast('Flag failed: ' .. err)
             else
                 show_toast('✓ ' .. (state and 'Added ' or 'Removed ') .. flag)
-                -- Refresh
-                mp.add_timeout(0.1, function()
-                    local res, _ = http_request('POST', '/parse', { text = current_text })
-                    if res and res.tokens then
-                        current_tokens = res.tokens
-                        render_subtitles()
-                        if popup_visible and popup_token then
-                            for _, tok in ipairs(current_tokens) do
-                                if tok.card.vid == popup_token.card.vid and
-                                   tok.card.sid == popup_token.card.sid then
-                                    popup_token = tok
-                                    break
-                                end
-                            end
-                            render_popup()
-                        end
-                    end
-                end)
+                refresh_after_action()
             end
         end)
 end
 
--- Dispatch a button action
 local function dispatch_button(btn)
     if not popup_token then return end
     local card = popup_token.card
-
     if btn.action == 'review' then
         do_review(card, btn.args.rating)
     elseif btn.action == 'mine' then
@@ -841,7 +897,6 @@ end
 local parse_timer = nil
 
 local function on_subtitle_change(_, new_text)
-    -- Guard: only process if text actually changed
     if new_text == last_parsed_text then
         dlog('sub-text unchanged, skipping parse')
         return
@@ -849,41 +904,31 @@ local function on_subtitle_change(_, new_text)
     last_parsed_text = new_text
     dlog('sub-text changed: "' .. tostring(new_text and new_text:sub(1,40)) .. '"')
 
-    -- Reset hover/popup state but keep OLD subtitle showing until new parse arrives
     hovered_token = nil
     popup_visible = false
     popup_token   = nil
     popup_buttons = {}
     subtitle_regions = {}
     render_popup()
-    -- NOTE: do NOT call jpdb_resume() here! Resume only via close_popup() or user action.
-    -- Resuming here caused a rapid-fire subtitle cycle that blanked the display.
-    -- NOTE: Do NOT call render_subtitles() here — keep old subtitle visible
-    -- until the async parse for the new text completes.
 
     if not new_text or new_text == '' then
         current_text   = ''
         current_tokens = {}
-        render_subtitles()  -- only clear overlay when text is truly empty
+        render_subtitles()
         return
     end
 
     current_text = new_text
 
-    -- Debounce: don't fire until text stabilizes (e.g. multi-line merges)
-    if parse_timer then
-        parse_timer:kill()
-    end
+    if parse_timer then parse_timer:kill() end
     parse_timer = mp.add_timeout(0.08, function()
         parse_timer = nil
-        -- Double-check text hasn't changed again during debounce
         if current_text ~= new_text then
             dlog('text changed during debounce, skipping')
             return
         end
         dlog('Sending async parse request for: "' .. new_text:sub(1,40) .. '"')
         http_request_async('POST', '/parse', { text = new_text }, function(res, err)
-            -- Only apply if text hasn't changed since we sent the request
             if current_text ~= new_text then
                 dlog('text changed while waiting for parse, ignoring response')
                 return
@@ -897,7 +942,6 @@ local function on_subtitle_change(_, new_text)
                 dlog('Parse ok: ' .. #res.tokens .. ' tokens')
                 current_tokens = res.tokens
                 render_subtitles()
-                -- If mouse is still over a word, auto-show popup
                 if hovered_token then
                     popup_token    = hovered_token
                     popup_visible  = true
@@ -910,17 +954,12 @@ local function on_subtitle_change(_, new_text)
 end
 
 mp.observe_property('sub-text', 'string', on_subtitle_change)
-
--- Disable default subtitle rendering so we can replace it with our colored version
 mp.set_property('sub-visibility', 'no')
-
--- Also hide any secondary subs
 mp.set_property('secondary-sub-visibility', 'no')
 
 -- ─── OSD setup & window resize ──────────────────────────────────────────────
 
 local function init_overlays()
-    -- Safe to call multiple times
     if not sub_osd then
         sub_osd = mp.create_osd_overlay('ass-events')
         sub_osd.z = 0
@@ -931,13 +970,10 @@ local function init_overlays()
         popup_osd.z = 1
         dlog('popup_osd created')
     end
-    sub_osd.res_x   = osd_w
-    sub_osd.res_y   = osd_h
-    popup_osd.res_x = osd_w
-    popup_osd.res_y = osd_h
+    sub_osd.res_x   = osd_w;  sub_osd.res_y   = osd_h
+    popup_osd.res_x = osd_w;  popup_osd.res_y = osd_h
 end
 
--- Initialize overlays immediately at script load so they are ready before any subtitle fires
 init_overlays()
 
 mp.register_event('file-loaded', function()
@@ -945,29 +981,23 @@ mp.register_event('file-loaded', function()
     local h = mp.get_property_number('osd-height') or osd_h
     if w > 0 then osd_w = w end
     if h > 0 then osd_h = h end
-    -- Re-init to update resolution
     init_overlays()
     dlog('file-loaded osd=' .. osd_w .. 'x' .. osd_h)
-    -- Re-render if we already have tokens (subtitle fired before file-loaded)
-    if #current_tokens > 0 then
-        render_subtitles()
-    end
+    if #current_tokens > 0 then render_subtitles() end
 end)
 
 mp.observe_property('osd-width', 'number', function(_, w)
     if w and w > 0 then osd_w = w end
     if sub_osd   then sub_osd.res_x   = osd_w end
     if popup_osd then popup_osd.res_x = osd_w end
-    render_subtitles()
-    render_popup()
+    render_subtitles(); render_popup()
 end)
 
 mp.observe_property('osd-height', 'number', function(_, h)
     if h and h > 0 then osd_h = h end
     if sub_osd   then sub_osd.res_y   = osd_h end
     if popup_osd then popup_osd.res_y = osd_h end
-    render_subtitles()
-    render_popup()
+    render_subtitles(); render_popup()
 end)
 
 -- ─── Pause / resume helpers ─────────────────────────────────────────────────
@@ -1001,8 +1031,7 @@ end
 
 -- ─── Mouse tracking ──────────────────────────────────────────────────────────
 
--- Forward declaration for click binding toggling
-local toggle_click_bindings
+local toggle_click_bindings  -- forward decl
 
 local mouse_timer = nil
 
@@ -1017,15 +1046,12 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
         local mx = hover_x
         local my = hover_y
 
-        -- Interaction zone: from popup top down to below subtitle
-        -- Use same formula as popup py so zone matches popup exactly
         local layout  = subtitle_layout()
-        local zone_y1 = math.max(10, layout.sub_text_top - 310)  -- popup top estimate
+        local zone_y1 = math.max(8, layout.sub_text_top - 400)
         local zone_y2 = layout.sub_y + 20
         local in_zone = (my >= zone_y1 and my <= zone_y2)
 
         if not in_zone then
-            -- Mouse outside the zone: close popup if open, resume video
             if popup_visible or hovered_token then
                 close_popup()
                 toggle_click_bindings(false)
@@ -1033,8 +1059,7 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
             return
         end
 
-        -- ── Inside interaction zone ──────────────────────────────────────
-        -- Update button hover highlight
+        -- Update button hover state
         if popup_visible then
             local btn = find_hovered_button(mx, my)
             local new_key = btn and btn.key or nil
@@ -1044,24 +1069,18 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
             end
         end
 
-        -- Track which subtitle word the mouse is over
         local new_token = find_hovered_token(mx, my)
-
         if new_token ~= hovered_token then
             hovered_token = new_token
-            render_subtitles()  -- update underline
+            render_subtitles()
 
             if new_token then
-                -- Entered a word → pause video, open popup
                 jpdb_pause()
                 popup_token    = new_token
                 popup_visible  = true
                 hovered_button = nil
                 render_popup()
                 toggle_click_bindings(true)
-            elseif not popup_visible then
-                -- No word but still in zone and no popup open → do nothing
-                -- (popup stays open when mouse moves from word to popup buttons)
             end
         end
     end)
@@ -1069,33 +1088,26 @@ end)
 
 -- ─── Mouse clicks ────────────────────────────────────────────────────────────
 
--- We ONLY bind left-click when the popup is visible, so normal mpv
--- pause/play on left click works fine when reading normal subs.
 local clicks_bound = false
 
 local function handle_left_click(event)
     if event and event.event ~= 'down' then return end
-    local mx = hover_x
-    local my = hover_y
+    local mx, my = hover_x, hover_y
     dlog('MBTN_LEFT DOWN at ' .. mx .. ',' .. my .. ' popup=' .. tostring(popup_visible))
-
     if popup_visible then
         local btn = find_hovered_button(mx, my)
         if btn then
             dispatch_button(btn)
-            -- Auto-close popup and resume after action
             close_popup()
             toggle_click_bindings(false)
             return
         end
-        -- Clicked outside buttons — dismiss popup, resume, unbind click
         close_popup()
         toggle_click_bindings(false)
     end
 end
 
 local function handle_left_dbl_click()
-    -- Absorb double click if popup is open so it doesn't accidentally fullscreen
     if popup_visible then return end
     mp.command('cycle fullscreen')
 end
@@ -1112,25 +1124,22 @@ toggle_click_bindings = function(enable)
     end
 end
 
--- Right-click: always bound to close popup
 mp.add_forced_key_binding('MBTN_RIGHT', 'jpdb-close-popup', function()
-    if popup_visible then 
-        close_popup() 
+    if popup_visible then
+        close_popup()
         toggle_click_bindings(false)
     end
 end)
 
 -- ─── Keyboard shortcuts ──────────────────────────────────────────────────────
 
--- ESC to close popup
 mp.add_key_binding('ESC', 'jpdb-esc', function()
-    if popup_visible then 
-        close_popup() 
+    if popup_visible then
+        close_popup()
         toggle_click_bindings(false)
     end
 end)
 
--- SPACE re-opens popup for hovered word without unpausing
 mp.add_key_binding('shift', 'jpdb-show-popup', function()
     if hovered_token and not popup_visible then
         popup_token    = hovered_token
@@ -1144,15 +1153,11 @@ mp.add_key_binding('shift', 'jpdb-show-popup', function()
     end
 end)
 
--- Quick-add hovered word to mining deck
 mp.add_key_binding('a', 'jpdb-add', function()
     local tok = popup_token or hovered_token
-    if tok then
-        do_mine(tok.card, current_text)
-    end
+    if tok then do_mine(tok.card, current_text) end
 end)
 
--- Quick review shortcuts
 local function review_hotkey(rating)
     return function()
         local tok = popup_token or hovered_token
@@ -1166,7 +1171,6 @@ mp.add_key_binding('3', 'jpdb-hard',      review_hotkey('hard'))
 mp.add_key_binding('4', 'jpdb-good',      review_hotkey('good'))
 mp.add_key_binding('5', 'jpdb-easy',      review_hotkey('easy'))
 
--- Blacklist / never-forget toggles
 mp.add_key_binding('b', 'jpdb-blacklist', function()
     local tok = popup_token or hovered_token
     if not tok then return end
@@ -1183,17 +1187,6 @@ mp.add_key_binding('n', 'jpdb-never-forget', function()
     do_set_flag(tok.card, 'never-forget', not is_nf)
 end)
 
--- Escape to close popup
-mp.add_key_binding('ESC', 'jpdb-esc', function()
-    if popup_visible then
-        popup_visible  = false
-        popup_token    = nil
-        popup_buttons  = {}
-        hovered_button = nil
-        render_popup()
-    end
-end)
-
 -- ─── Cleanup on exit ─────────────────────────────────────────────────────────
 
 mp.register_event('shutdown', function()
@@ -1201,4 +1194,4 @@ mp.register_event('shutdown', function()
     if popup_osd then popup_osd:remove() end
 end)
 
-msg.info('[jpdb] Plugin loaded. server.js must be running at ' .. SERVER_URL)
+msg.info('[jpdb] Plugin loaded (UI v2). server.js must be running at ' .. SERVER_URL)
