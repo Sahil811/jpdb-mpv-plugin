@@ -490,18 +490,25 @@ local function render_popup()
     local state = get_primary_state(card.state)
     local color = STATE_COLORS[state] or '&HFFFFFF&'
 
-    -- Popup y: just above the subtitle line.
-    -- Subtitle anchor is at osd_h-60. Estimate popup bottom = osd_h - 70.
-    -- We'll compute actual height below, then position accordingly.
-    -- For now use a fixed py and adjust if needed.
-    local sub_y_approx = osd_h - 60
-    -- We'll position so popup bottom is ~10px above subtitle top (sub_y - fs - 6)
-    local popup_bottom_target = sub_y_approx - 46
-    -- Estimate popup height: header+badges+freq+sep+6meanings+sep+2btnrows+padding ≈ 280px
-    local popup_h_estimate = 280
-    local py = math.max(10, popup_bottom_target - popup_h_estimate)
+    -- Popup position: always strictly ABOVE the subtitle area
+    -- sub_text_top = top of topmost subtitle line pixel
+    -- popup bottom = sub_text_top - 10px gap → guaranteed never overlaps subtitle
+    local layout = subtitle_layout()
+    local popup_max_bottom = layout.sub_text_top - 10
+    -- Estimate popup height to set py; actual height computed as cur_y grows
+    local popup_h_est = math.min(popup_max_bottom - 10, 300)
+    local py = math.max(10, popup_max_bottom - popup_h_est)
 
-    local px = math.max(10, math.min(hover_x - POPUP_WIDTH / 2, osd_w - POPUP_WIDTH - 10))
+    -- Popup x: calculate from the center of the token's hit region, NOT current mouse position.
+    -- This ensures the popup doesn't move when you move the mouse to click buttons!
+    local tok_center_x = hover_x -- fallback
+    for _, region in ipairs(subtitle_regions) do
+        if region.token == popup_token then
+            tok_center_x = (region.x1 + region.x2) / 2
+            break
+        end
+    end
+    local px = math.max(10, math.min(tok_center_x - POPUP_WIDTH / 2, osd_w - POPUP_WIDTH - 10))
 
     local ev     = {}  -- ASS event lines
     local text_x = px + 16
