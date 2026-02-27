@@ -49,11 +49,9 @@ mp.add_timeout(0.5, function()
     mp.osd_message('[jpdb] Plugin loaded! server.js must be running.', 4)
 end)
 
--- ─── Configuration ──────────────────────────────────────────────────────────
-
 local SERVER_URL   = 'http://127.0.0.1:9726'
-local POPUP_WIDTH  = 400  -- popup panel width in OSD pixels
-local POPUP_MAX_H  = 500  -- max popup height
+local POPUP_WIDTH  = 560  -- ultra-wide for premium readability
+local POPUP_MAX_H  = 700  -- max popup height
 local FONT_FAMILY  = 'Yu Gothic UI'  -- popup font (supports Japanese/CJK)
 
 -- Card state to ASS color (BGR order, &H<BB><GG><RR>&)
@@ -493,30 +491,58 @@ local function render_popup()
     local color = STATE_COLORS[state] or '&HFFFFFF&'
 
     -- ── Pass 1: pre-compute content height ───────────────────────────────
-    local PAD   = 14   -- horizontal inner padding
-    local LBAR  = 5    -- left accent bar width
-    local content_h = 14 + 40 + 6  -- top pad + word line + gap
-    if card.spelling ~= card.reading then
-        content_h = content_h + 26  -- reading line
+    local PAD   = 24   -- generous horizontal inner padding
+    local LBAR  = 8    -- left accent bar width
+    local MEANING_FS = 26 -- font size for English meanings
+    local MAX_CHARS_PER_LINE = 44 -- approximate max chars at fs 26 over 560px
+    
+    local function wrap_text(text, max_len)
+        local lines = {}
+        local current_line = {}
+        local current_len = 0
+        
+        -- Simple word wrap by spaces
+        for word in text:gmatch("%S+") do
+            local w_len = utf8_len(word)
+            if current_len + w_len + 1 > max_len and #current_line > 0 then
+                table.insert(lines, table.concat(current_line, " "))
+                current_line = {word}
+                current_len = w_len
+            else
+                table.insert(current_line, word)
+                current_len = current_len + w_len + (current_len > 0 and 1 or 0)
+            end
+        end
+        if #current_line > 0 then
+            table.insert(lines, table.concat(current_line, " "))
+        end
+        return lines
     end
-    content_h = content_h + 20  -- state badge line
-    if card.frequencyRank then content_h = content_h + 20 end
-    content_h = content_h + 12  -- section gap before meanings
+
+    local content_h = 20 + 60 + 10  -- top pad + word line + gap
+    if card.spelling ~= card.reading then
+        content_h = content_h + 34  -- reading line
+    end
+    content_h = content_h + 28  -- state badge line
+    if card.frequencyRank then content_h = content_h + 28 end
+    content_h = content_h + 20  -- section gap before meanings
     local n_meanings = 0
     local last_pos_pass1 = nil
     for _, m in ipairs(card.meanings or {}) do
         if n_meanings >= 5 then break end
         local pl = get_pos_label(m.partOfSpeech)
         if pl ~= '' and pl ~= last_pos_pass1 then
-            content_h = content_h + 18
+            content_h = content_h + 26
             last_pos_pass1 = pl
         end
-        content_h = content_h + 22
+        local gloss = table.concat(m.glosses or {}, '; ')
+        local wrapped_lines = wrap_text(gloss, MAX_CHARS_PER_LINE)
+        content_h = content_h + (#wrapped_lines * 38) -- 38px per line for fs 26
         n_meanings = n_meanings + 1
     end
-    content_h = content_h + 12  -- gap before buttons
-    content_h = content_h + 28 + 6  -- action row + gap
-    content_h = content_h + 32 + 12 -- review row + bottom padding
+    content_h = content_h + 20  -- gap before buttons
+    content_h = content_h + 38 + 8  -- action row + gap
+    content_h = content_h + 46 + 20 -- review row + bottom padding
 
     -- ── Compute popup position ────────────────────────────────────────────
     local layout = subtitle_layout()
@@ -535,38 +561,38 @@ local function render_popup()
     -- ── Pass 2: draw everything ───────────────────────────────────────────
     local ev     = {}
     local text_x = px + LBAR + PAD   -- text inset (past accent bar + padding)
-    local cur_y  = py + 14
+    local cur_y  = py + 20
 
     -- Word / kanji (large, bold, card state color)
-    ass_text(ev, text_x, cur_y, FONT_FAMILY, 34, true, color, '&H00&',
+    ass_text(ev, text_x, cur_y, FONT_FAMILY, 56, true, color, '&H00&',
         ass_escape(card.spelling))
-    cur_y = cur_y + 40
+    cur_y = cur_y + 60
 
     -- Reading (hiragana) — only if different from spelling
     if card.spelling ~= card.reading then
-        ass_text(ev, text_x, cur_y, FONT_FAMILY, 18, false, '&HBBBBCC&', '&H00&',
+        ass_text(ev, text_x, cur_y, FONT_FAMILY, 28, false, '&HBBBBCC&', '&H00&',
             ass_escape(card.reading))
-        cur_y = cur_y + 26
+        cur_y = cur_y + 34
     end
 
     -- State badges  (e.g. "● new", "● learning")
     local badge_x = text_x
     for _, s in ipairs(card.state) do
         local sc = STATE_COLORS[s] or '&H999999&'
-        ass_text(ev, badge_x, cur_y, FONT_FAMILY, 13, false, sc, '&H00&',
+        ass_text(ev, badge_x, cur_y, FONT_FAMILY, 18, false, sc, '&H00&',
             '● ' .. ass_escape(s))
-        badge_x = badge_x + (utf8_len(s) * 9 + 28)
+        badge_x = badge_x + (utf8_len(s) * 12 + 36)
     end
-    cur_y = cur_y + 20
+    cur_y = cur_y + 28
 
     -- Frequency rank (right-aligned look — just append after badges)
     if card.frequencyRank then
-        ass_text(ev, text_x, cur_y, FONT_FAMILY, 13, false, '&H8888AA&', '&H00&',
+        ass_text(ev, text_x, cur_y, FONT_FAMILY, 18, false, '&H8888AA&', '&H00&',
             'freq #' .. tostring(card.frequencyRank))
-        cur_y = cur_y + 20
+        cur_y = cur_y + 28
     end
 
-    cur_y = cur_y + 12  -- breathe before meanings
+    cur_y = cur_y + 20  -- breathe before meanings
 
     -- ── Meanings ─────────────────────────────────────────────────────────
     local shown    = 0
@@ -576,39 +602,32 @@ local function render_popup()
         local pos_label = get_pos_label(m.partOfSpeech)
         if pos_label ~= '' and pos_label ~= last_pos then
             -- Part-of-speech label: small, muted, italic-style
-            ass_text(ev, text_x, cur_y, FONT_FAMILY, 12, false, '&H8899BB&', '&H00&',
+            ass_text(ev, text_x, cur_y, FONT_FAMILY, 16, false, '&H8899BB&', '&H00&',
                 pos_label)
-            cur_y    = cur_y + 18
+            cur_y    = cur_y + 26
             last_pos = pos_label
         end
         local gloss = table.concat(m.glosses or {}, '; ')
-        -- Trim long glosses to 46 chars so they stay on one line
-        if utf8_len(gloss) > 46 then
-            local b, n = 1, 0
-            while b <= #gloss and n < 46 do
-                local byte = gloss:byte(b)
-                if byte < 0x80 then b = b + 1
-                elseif byte < 0xE0 then b = b + 2
-                elseif byte < 0xF0 then b = b + 3
-                else b = b + 4 end
-                n = n + 1
-            end
-            gloss = gloss:sub(1, b - 1) .. '…'
+        local wrapped_lines = wrap_text(gloss, MAX_CHARS_PER_LINE)
+        
+        -- Pure white for maximum readability, no alternating dim colors
+        local txt_color = '&HFFFFFF&' 
+        
+        for line_idx, line_text in ipairs(wrapped_lines) do
+            local prefix = (line_idx == 1) and (i .. '.  ') or '    '
+            ass_text(ev, text_x + 6, cur_y, FONT_FAMILY, MEANING_FS, false, txt_color, '&H00&',
+                prefix .. ass_escape(line_text))
+            cur_y = cur_y + 38
         end
-        -- Alternating row shading for readability
-        local txt_color = (i % 2 == 1) and '&HEEEEEE&' or '&HCCCCCC&'
-        ass_text(ev, text_x + 4, cur_y, FONT_FAMILY, 15, false, txt_color, '&H00&',
-            i .. '.  ' .. ass_escape(gloss))
-        cur_y = cur_y + 22
         shown = shown + 1
     end
 
-    cur_y = cur_y + 12  -- breathe before buttons
+    cur_y = cur_y + 20  -- breathe before buttons
 
     -- ── Action row (Add / Blacklist / Never-Forget) ───────────────────────
-    local bh_action = 28
-    local bh_review = 32
-    local gap = 5
+    local bh_action = 38
+    local bh_review = 46
+    local gap = 8
 
     local function draw_button(label, key, action, args, bx, by, bw, bh)
         local is_hov = (hovered_button == key)
@@ -620,7 +639,7 @@ local function render_popup()
             ass_rect(ev, bx, by, bw, 1, '&HFFFFFF&', '&HCC&')
         end
         local label_color = '&HFFFFFF&'
-        ass_text_center(ev, bx + bw / 2, by + bh / 2, FONT_FAMILY, 13, false, label_color, '&H00&', label)
+        ass_text_center(ev, bx + bw / 2, by + bh / 2, FONT_FAMILY, 18, false, label_color, '&H00&', label)
         table.insert(popup_buttons, { x1=bx, y1=by, x2=bx+bw, y2=by+bh, key=key, action=action, args=args })
     end
 
@@ -671,7 +690,7 @@ local function render_popup()
     -- Subtle top border (slightly lighter than bg for definition)
     ass_rect(all_ev, px, py, POPUP_WIDTH, 1, '&H3A3A4A&', '&H00&')
     -- Header area background (slightly lighter to create section separation)
-    local header_h = (card.spelling ~= card.reading and 14+40+26 or 14+40) + 20
+    local header_h = (card.spelling ~= card.reading and 20+60+34 or 20+60) + 28
     ass_rect(all_ev, px + LBAR, py, POPUP_WIDTH - LBAR, header_h, '&H16161E&', '&H00&')
 
     -- Stack background then content
