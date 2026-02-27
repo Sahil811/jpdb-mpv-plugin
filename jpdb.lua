@@ -336,13 +336,13 @@ local function build_subtitle_ass(tokens, raw_text)
 end
 
 -- Shared subtitle layout constants (used by both render_subtitles and popup positioning)
-local CHAR_PX     = 40   -- OSD units per CJK char at fs40
-local LINE_HEIGHT = 48   -- fs40 + line spacing (≈ 1.2 × CHAR_PX)
+local CHAR_PX     = 48   -- OSD units per CJK char at fs48 (20% larger than 40)
+local LINE_HEIGHT = 58   -- fs48 + line spacing (≈ 1.2 × CHAR_PX)
 
 local function subtitle_layout()
     -- Returns {n_lines, sub_y_anchor, sub_text_top, lines_info}
-    -- sub_text_top: Y of the topmost subtitle pixel (for popup: popup must end above here)
-    local sub_y = osd_h - 60
+    -- Move subtitle anchor up to avoid mpv's default Bottom OSC (typically 40-80px tall)
+    local sub_y = osd_h - 100
     local lines = split_text_lines(current_text)
     local n     = #lines
     local sub_text_top = sub_y - n * LINE_HEIGHT
@@ -406,7 +406,7 @@ local function render_subtitles()
     a:new_event()
     a:append('{\\an2')
     a:append('\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')')
-    a:append('\\fs40')
+    a:append('\\fs48')
     a:append('\\bord2')
     a:append('\\shad1')
     a:append('\\b0}')
@@ -492,9 +492,9 @@ local function render_popup()
 
     -- Popup position: always strictly ABOVE the subtitle area
     -- sub_text_top = top of topmost subtitle line pixel
-    -- popup bottom = sub_text_top - 10px gap → guaranteed never overlaps subtitle
+    -- popup bottom = sub_text_top - 30px gap → guaranteed never overlaps subtitle
     local layout = subtitle_layout()
-    local popup_max_bottom = layout.sub_text_top - 10
+    local popup_max_bottom = layout.sub_text_top - 30
     -- Estimate popup height to set py; actual height computed as cur_y grows
     local popup_h_est = math.min(popup_max_bottom - 10, 300)
     local py = math.max(10, popup_max_bottom - popup_h_est)
@@ -936,6 +936,9 @@ end
 
 -- ─── Mouse tracking ──────────────────────────────────────────────────────────
 
+-- Forward declaration for click binding toggling
+local toggle_click_bindings
+
 local mouse_timer = nil
 
 mp.observe_property('mouse-pos', 'native', function(_, pos)
@@ -960,6 +963,7 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
             -- Mouse outside the zone: close popup if open, resume video
             if popup_visible or hovered_token then
                 close_popup()
+                toggle_click_bindings(false)
             end
             return
         end
@@ -989,6 +993,7 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                 popup_visible  = true
                 hovered_button = nil
                 render_popup()
+                toggle_click_bindings(true)
             elseif not popup_visible then
                 -- No word but still in zone and no popup open → do nothing
                 -- (popup stays open when mouse moves from word to popup buttons)
@@ -999,8 +1004,11 @@ end)
 
 -- ─── Mouse clicks ────────────────────────────────────────────────────────────
 
--- Click is ONLY for interacting with popup buttons.
-mp.add_forced_key_binding('MBTN_LEFT', 'jpdb-click', function(event)
+-- We ONLY bind left-click when the popup is visible, so normal mpv
+-- pause/play on left click works fine when reading normal subs.
+local clicks_bound = false
+
+local function handle_left_click(event)
     if event and event.event ~= 'down' then return end
     local mx = hover_x
     local my = hover_y
@@ -1012,27 +1020,46 @@ mp.add_forced_key_binding('MBTN_LEFT', 'jpdb-click', function(event)
             dispatch_button(btn)
             return
         end
-        -- Clicked outside buttons — dismiss popup and resume
+        -- Clicked outside buttons — dismiss popup, resume, unbind click
         close_popup()
+        toggle_click_bindings(false)
     end
-end, { complex = true })
+end
 
--- Double-click: absorb if popup open, otherwise fullscreen toggle
-mp.add_forced_key_binding('MBTN_LEFT_DBL', 'jpdb-dbl-click', function()
+local function handle_left_dbl_click()
+    -- Absorb double click if popup is open so it doesn't accidentally fullscreen
     if popup_visible then return end
     mp.command('cycle fullscreen')
-end)
+end
 
--- Right-click: close popup
+toggle_click_bindings = function(enable)
+    if enable and not clicks_bound then
+        mp.add_forced_key_binding('MBTN_LEFT', 'jpdb-click', handle_left_click, { complex = true })
+        mp.add_forced_key_binding('MBTN_LEFT_DBL', 'jpdb-dbl-click', handle_left_dbl_click)
+        clicks_bound = true
+    elseif not enable and clicks_bound then
+        mp.remove_key_binding('jpdb-click')
+        mp.remove_key_binding('jpdb-dbl-click')
+        clicks_bound = false
+    end
+end
+
+-- Right-click: always bound to close popup
 mp.add_forced_key_binding('MBTN_RIGHT', 'jpdb-close-popup', function()
-    if popup_visible then close_popup() end
+    if popup_visible then 
+        close_popup() 
+        toggle_click_bindings(false)
+    end
 end)
 
 -- ─── Keyboard shortcuts ──────────────────────────────────────────────────────
 
 -- ESC to close popup
 mp.add_key_binding('ESC', 'jpdb-esc', function()
-    if popup_visible then close_popup() end
+    if popup_visible then 
+        close_popup() 
+        toggle_click_bindings(false)
+    end
 end)
 
 -- SPACE re-opens popup for hovered word without unpausing
@@ -1042,8 +1069,10 @@ mp.add_key_binding('shift', 'jpdb-show-popup', function()
         popup_visible  = true
         hovered_button = nil
         render_popup()
+        toggle_click_bindings(true)
     elseif popup_visible then
         close_popup()
+        toggle_click_bindings(false)
     end
 end)
 
