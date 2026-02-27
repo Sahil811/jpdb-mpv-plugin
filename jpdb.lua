@@ -2,10 +2,11 @@
     jpdb.lua — JPDB MPV Plugin  (UI/UX v2 — Google-level redesign)
     OPTIMIZED: throttled mouse, memoized subtitle ASS, string pooling,
                batched OSD, lazy dlog, removed redundant renders.
+    UX FIXES: Hover debouncing, popup safe-zones, strict hit-testing.
 ]]
 
 local mp         = require('mp')
-local msg        = mp.msg
+local msg        = require('mp.msg')
 local assdraw    = require('mp.assdraw')
 local utils      = require('mp.utils')
 
@@ -143,6 +144,11 @@ local popup_osd        = nil
 local sub_osd          = nil
 local popup_buttons    = {}
 local hovered_button   = nil
+local popup_rect       = nil  -- Bounding box to lock hover when moving to menu
+
+-- Debounce tracking states
+local hover_pending_token  = nil
+local hover_debounce_timer = nil
 
 local osd_w = 1280
 local osd_h = 720
@@ -223,7 +229,7 @@ local function utf8_len(s)
         if     b < 0x80 then i = i + 1
         elseif b < 0xE0 then i = i + 2
         elseif b < 0xF0 then i = i + 3
-        else                  i = i + 4 end
+        else                 i = i + 4 end
         n = n + 1
     end
     return n
@@ -236,7 +242,7 @@ local function utf8_byte_to_char(s, byte_pos)
         if     b < 0x80 then i = i + 1
         elseif b < 0xE0 then i = i + 2
         elseif b < 0xF0 then i = i + 3
-        else                  i = i + 4 end
+        else                 i = i + 4 end
         n = n + 1
     end
     return n
@@ -262,7 +268,7 @@ local function split_text_lines(text)
             if     b < 0x80 then i = i + 1
             elseif b < 0xE0 then i = i + 2
             elseif b < 0xF0 then i = i + 3
-            else                  i = i + 4 end
+            else                 i = i + 4 end
         end
     end
     result[#result+1] = {
@@ -275,13 +281,11 @@ end
 
 -- ─── ASS helpers ────────────────────────────────────────────────────────────
 
--- PERF: pre-compile escape pattern; use direct gsub chain
 local function ass_escape(s)
     if not s then return '' end
     return s:gsub('\\', '\\\\'):gsub('{', '\\{'):gsub('}', '\\}'):gsub('\n', '\\N')
 end
 
--- PERF: use string.format once, avoid table.insert overhead for hot paths
 local _fmt = string.format
 
 local function ass_rect(events, x, y, w, h, color, alpha)
@@ -321,7 +325,6 @@ end
 
 local function build_subtitle_ass(tokens, raw_text)
     if not tokens or #tokens == 0 then return nil end
-    -- PERF: pre-allocate parts table with known size hint
     local parts = {}
     local last  = 0
     table.sort(tokens, function(a, b) return a.start < b.start end)
@@ -361,7 +364,6 @@ local function render_subtitles()
     if not sub_osd then return end
     subtitle_regions = {}
     if #current_tokens == 0 then
-        -- PERF: only update OSD if data actually changed
         if sub_osd.data ~= '' then
             sub_osd.data = ''
             sub_osd:update()
@@ -369,7 +371,6 @@ local function render_subtitles()
         return
     end
 
-    -- PERF: build a cheap cache key from token count + hovered pointer
     local token_id = #current_tokens .. ':' .. tostring(hovered_token)
     local ass_content
     if cached_sub_token_id == token_id and cached_sub_ass then
@@ -411,9 +412,6 @@ local function render_subtitles()
         end
     end
 
-    dlog(_fmt('regions=%d lines=%d sub_y=%d osd=%dx%d',
-        #subtitle_regions, layout.n, layout.sub_y, osd_w, osd_h))
-
     local a = assdraw.ass_new()
     a:new_event()
     a:append('{\\an2')
@@ -421,7 +419,6 @@ local function render_subtitles()
     a:append('\\fs48\\bord2\\shad1\\b0}')
     a:append(ass_content)
 
-    -- PERF: only push update when text differs
     if sub_osd.data ~= a.text then
         sub_osd.data = a.text
         sub_osd:update()
@@ -454,7 +451,6 @@ local function get_pos_label(pos_list)
     return table.concat(labels, ' · ')
 end
 
--- PERF: reuse word table across calls to reduce GC pressure
 local function wrap_text(text, max_chars)
     local lines, cur, cur_len = {}, {}, 0
     for word in text:gmatch('%S+') do
@@ -491,6 +487,7 @@ local BTN_SHORTCUTS = {
 local function render_popup()
     if not popup_osd then return end
     if not popup_visible or not popup_token then
+        popup_rect = nil
         if popup_osd.data ~= '' then popup_osd.data = ''; popup_osd:update() end
         return
     end
@@ -507,7 +504,6 @@ local function render_popup()
     local content_x = LB + PAD
     local WRAP_CHARS = 42
 
-    -- ── PASS 1: measure total height ─────────────────────────────────────
     local function measure_h()
         local h = DS.pad_v + DS.lh_kanji
         if card.spelling ~= card.reading then h = h + DS.lh_reading end
@@ -539,15 +535,15 @@ local function render_popup()
         end
     end
     local px = math.max(8, math.min(tok_cx - W / 2, osd_w - W - 8))
+    
+    -- Save exact dimensions to lock interactions to the popup
+    popup_rect = { x1 = px, y1 = py, x2 = px + W, y2 = py + total_h }
 
     local bg_ev = {}
     local fg_ev = {}
 
-    -- Drop shadow
     ass_rect(bg_ev, px + 6, py + 8, W, total_h, DS.shadow_col, '&HCC&')
     ass_rect(bg_ev, px + 3, py + 4, W, total_h, DS.shadow_col, '&H88&')
-
-    -- Main surface + accent bar + top border + header band
     ass_rect(bg_ev, px,      py, W,    total_h, DS.bg_surface, '&H00&')
     ass_rect(bg_ev, px,      py, LB,   total_h, s_color,       '&H00&')
     ass_rect(bg_ev, px + LB, py, W-LB, 1,       s_color,       '&HC0&')
@@ -657,25 +653,31 @@ local function render_popup()
         bx = bx + rev_w + DS.btn_gap
     end
 
-    -- PERF: merge bg + fg arrays in one pass, avoid intermediate concat
     local all = {}
     local nb = #bg_ev
     for i = 1, nb         do all[i]    = bg_ev[i] end
     for i = 1, #fg_ev     do all[nb+i] = fg_ev[i] end
 
     local new_data = table.concat(all, '\n')
-    -- PERF: only push OSD update if content actually changed
     if popup_osd.data ~= new_data then
         popup_osd.data = new_data
         popup_osd:update()
     end
-
-    dlog(_fmt('render_popup px=%d py=%d h=%d btn_count=%d', px, py, total_h, #popup_buttons))
 end
 
 -- ─── Mouse position → subtitle token mapping ─────────────────────────────────
 
 local function find_hovered_token(mx, my)
+    -- Pass 1: Strict strict bounding-box test for perfect accuracy
+    for _, region in ipairs(subtitle_regions) do
+        if my >= region.y1 and my <= region.y2 then
+            if mx >= region.x1 and mx <= region.x2 then
+                return region.token
+            end
+        end
+    end
+    
+    -- Pass 2: Fallback to proximity (within 8px buffer)
     local best_tok, best_dist = nil, math.huge
     for _, region in ipairs(subtitle_regions) do
         if my >= region.y1 and my <= region.y2 then
@@ -710,7 +712,6 @@ local function refresh_after_action()
         local res, _ = http_request('POST', '/parse', { text = current_text })
         if res and res.tokens then
             current_tokens      = res.tokens
-            -- PERF: invalidate subtitle cache after token refresh
             cached_sub_ass      = nil
             cached_sub_token_id = nil
             render_subtitles()
@@ -772,19 +773,18 @@ end
 local parse_timer = nil
 
 local function on_subtitle_change(_, new_text)
-    if new_text == last_parsed_text then
-        dlog('sub-text unchanged, skipping parse')
-        return
-    end
+    if new_text == last_parsed_text then return end
     last_parsed_text = new_text
-    dlog('sub-text changed: "' .. tostring(new_text and new_text:sub(1,40)) .. '"')
 
+    if hover_debounce_timer then hover_debounce_timer:kill(); hover_debounce_timer = nil end
+    hover_pending_token = nil
+    
     hovered_token = nil
     popup_visible = false
     popup_token   = nil
     popup_buttons = {}
+    popup_rect    = nil
     subtitle_regions    = {}
-    -- PERF: invalidate subtitle cache on new subtitle
     cached_sub_ass      = nil
     cached_sub_token_id = nil
     render_popup()
@@ -801,23 +801,10 @@ local function on_subtitle_change(_, new_text)
     if parse_timer then parse_timer:kill() end
     parse_timer = mp.add_timeout(0.08, function()
         parse_timer = nil
-        if current_text ~= new_text then
-            dlog('text changed during debounce, skipping')
-            return
-        end
-        dlog('Sending async parse request for: "' .. new_text:sub(1,40) .. '"')
+        if current_text ~= new_text then return end
         http_request_async('POST', '/parse', { text = new_text }, function(res, err)
-            if current_text ~= new_text then
-                dlog('text changed while waiting for parse, ignoring response')
-                return
-            end
-            if err then
-                dlog('Parse error: ' .. tostring(err))
-                msg.warn('[jpdb] Parse error: ' .. tostring(err))
-                return
-            end
+            if current_text ~= new_text or err then return end
             if res and res.tokens then
-                dlog('Parse ok: ' .. #res.tokens .. ' tokens')
                 current_tokens      = res.tokens
                 cached_sub_ass      = nil
                 cached_sub_token_id = nil
@@ -837,56 +824,12 @@ mp.observe_property('sub-text', 'string', on_subtitle_change)
 mp.set_property('sub-visibility', 'no')
 mp.set_property('secondary-sub-visibility', 'no')
 
--- ─── OSD setup & window resize ──────────────────────────────────────────────
-
-local function init_overlays()
-    if not sub_osd then
-        sub_osd = mp.create_osd_overlay('ass-events')
-        sub_osd.z = 0
-        dlog('sub_osd created')
-    end
-    if not popup_osd then
-        popup_osd = mp.create_osd_overlay('ass-events')
-        popup_osd.z = 1
-        dlog('popup_osd created')
-    end
-    sub_osd.res_x   = osd_w;  sub_osd.res_y   = osd_h
-    popup_osd.res_x = osd_w;  popup_osd.res_y = osd_h
-end
-
-init_overlays()
-
-mp.register_event('file-loaded', function()
-    local w = mp.get_property_number('osd-width')  or osd_w
-    local h = mp.get_property_number('osd-height') or osd_h
-    if w > 0 then osd_w = w end
-    if h > 0 then osd_h = h end
-    init_overlays()
-    dlog('file-loaded osd=' .. osd_w .. 'x' .. osd_h)
-    if #current_tokens > 0 then render_subtitles() end
-end)
-
-mp.observe_property('osd-width', 'number', function(_, w)
-    if w and w > 0 then osd_w = w end
-    if sub_osd   then sub_osd.res_x   = osd_w end
-    if popup_osd then popup_osd.res_x = osd_w end
-    render_subtitles(); render_popup()
-end)
-
-mp.observe_property('osd-height', 'number', function(_, h)
-    if h and h > 0 then osd_h = h end
-    if sub_osd   then sub_osd.res_y   = osd_h end
-    if popup_osd then popup_osd.res_y = osd_h end
-    render_subtitles(); render_popup()
-end)
-
 -- ─── Pause / resume helpers ─────────────────────────────────────────────────
 
 local function jpdb_pause()
     if not jpdb_did_pause and not mp.get_property_bool('pause') then
         mp.set_property_bool('pause', true)
         jpdb_did_pause = true
-        dlog('paused for lookup')
     end
 end
 
@@ -894,94 +837,131 @@ local function jpdb_resume()
     if jpdb_did_pause then
         mp.set_property_bool('pause', false)
         jpdb_did_pause = false
-        dlog('resumed after lookup')
     end
 end
+
+local toggle_click_bindings
 
 local function close_popup()
     popup_visible  = false
     popup_token    = nil
     popup_buttons  = {}
+    popup_rect     = nil
     hovered_button = nil
     hovered_token  = nil
+    if hover_debounce_timer then
+        hover_debounce_timer:kill()
+        hover_debounce_timer = nil
+    end
+    hover_pending_token = nil
     render_popup()
     render_subtitles()
     jpdb_resume()
+    if toggle_click_bindings then toggle_click_bindings(false) end
 end
 
 -- ─── Mouse tracking ──────────────────────────────────────────────────────────
 
-local toggle_click_bindings
-
 local mouse_timer = nil
 
--- PERF: throttle mouse callbacks to ~60fps (16ms); avoid processing
--- every single pixel move (mpv can fire 100+ mouse-pos events/sec).
 mp.observe_property('mouse-pos', 'native', function(_, pos)
     if not pos then return end
     hover_x = pos.x
     hover_y = pos.y
 
-    if mouse_timer then return end  -- already scheduled, just update coords
+    if mouse_timer then return end
     mouse_timer = mp.add_timeout(0.016, function()
         mouse_timer = nil
         local mx, my = hover_x, hover_y
 
+        -- 1. Check if we are inside the popup menu (safe-zone)
+        if popup_visible and popup_rect then
+            local pad = 15 -- pixel buffer around popup box
+            if mx >= popup_rect.x1 - pad and mx <= popup_rect.x2 + pad and
+               my >= popup_rect.y1 - pad and my <= popup_rect.y2 + pad then
+               
+                -- Interacting with the popup -> lock the hover state
+                if hover_debounce_timer then hover_debounce_timer:kill(); hover_debounce_timer = nil end
+                hover_pending_token = nil
+
+                local btn     = find_hovered_button(mx, my)
+                local new_key = btn and btn.key or nil
+                if new_key ~= hovered_button then
+                    hovered_button = new_key
+                    render_popup()
+                end
+                return -- Skip subtitle token checks
+            end
+        end
+
+        -- 2. Check if we are generally in the interactive UI zone
         local layout  = subtitle_layout()
-        local zone_y1 = math.max(8, layout.sub_text_top - 400)
-        local zone_y2 = layout.sub_y + 20
+        local zone_y1 = math.max(0, layout.sub_text_top - 500)
+        local zone_y2 = layout.sub_y + 40
         local in_zone = (my >= zone_y1 and my <= zone_y2)
 
         if not in_zone then
             if popup_visible or hovered_token then
                 close_popup()
-                toggle_click_bindings(false)
             end
             return
         end
 
-        if popup_visible then
-            local btn     = find_hovered_button(mx, my)
-            local new_key = btn and btn.key or nil
-            if new_key ~= hovered_button then
-                hovered_button = new_key
-                render_popup()
-            end
-        end
-
+        -- 3. Token hit testing with Debounce
         local new_token = find_hovered_token(mx, my)
-        if new_token ~= hovered_token then
-            hovered_token = new_token
-            -- PERF: invalidate subtitle ASS cache when hover changes (underline changes)
-            cached_sub_ass      = nil
-            cached_sub_token_id = nil
-            render_subtitles()
 
-            if new_token then
-                jpdb_pause()
-                popup_token    = new_token
-                popup_visible  = true
+        if new_token ~= hovered_token then
+            if new_token ~= hover_pending_token then
+                hover_pending_token = new_token
+                if hover_debounce_timer then hover_debounce_timer:kill() end
+
+                -- Quick trigger if entering a word; slight grace period when leaving
+                local delay = new_token and 0.15 or 0.25 
+
+                hover_debounce_timer = mp.add_timeout(delay, function()
+                    hover_debounce_timer = nil
+                    hovered_token = hover_pending_token
+                    cached_sub_ass = nil
+                    cached_sub_token_id = nil
+                    render_subtitles()
+
+                    if hovered_token then
+                        jpdb_pause()
+                        popup_token    = hovered_token
+                        popup_visible  = true
+                        hovered_button = nil
+                        render_popup()
+                        toggle_click_bindings(true)
+                    elseif not popup_visible then
+                        close_popup()
+                    end
+                end)
+            end
+        else
+            -- We are still on the active token, cancel any pending changes
+            if hover_debounce_timer then hover_debounce_timer:kill(); hover_debounce_timer = nil end
+            hover_pending_token = nil
+
+            -- Clear hovered button if we drifted off the popup back onto the token
+            if popup_visible and hovered_button ~= nil then
                 hovered_button = nil
                 render_popup()
-                toggle_click_bindings(true)
             end
         end
     end)
 end)
 
--- ─── Mouse clicks ────────────────────────────────────────────────────────────
+-- ─── Mouse clicks & Overlays setup (Remaining boilerplate) ───────────────────
 
 local clicks_bound = false
 
 local function handle_left_click(event)
     if event and event.event ~= 'down' then return end
     local mx, my = hover_x, hover_y
-    dlog('MBTN_LEFT DOWN at ' .. mx .. ',' .. my .. ' popup=' .. tostring(popup_visible))
     if popup_visible then
         local btn = find_hovered_button(mx, my)
         if btn then dispatch_button(btn) end
         close_popup()
-        toggle_click_bindings(false)
     end
 end
 
@@ -1002,13 +982,11 @@ toggle_click_bindings = function(enable)
 end
 
 mp.add_forced_key_binding('MBTN_RIGHT', 'jpdb-close-popup', function()
-    if popup_visible then close_popup(); toggle_click_bindings(false) end
+    if popup_visible then close_popup() end
 end)
 
--- ─── Keyboard shortcuts ──────────────────────────────────────────────────────
-
 mp.add_key_binding('ESC', 'jpdb-esc', function()
-    if popup_visible then close_popup(); toggle_click_bindings(false) end
+    if popup_visible then close_popup() end
 end)
 
 mp.add_key_binding('shift', 'jpdb-show-popup', function()
@@ -1020,7 +998,6 @@ mp.add_key_binding('shift', 'jpdb-show-popup', function()
         toggle_click_bindings(true)
     elseif popup_visible then
         close_popup()
-        toggle_click_bindings(false)
     end
 end)
 
@@ -1058,12 +1035,46 @@ mp.add_key_binding('n', 'jpdb-never-forget', function()
     do_set_flag(tok.card, 'never-forget', not is_nf)
 end)
 
--- ─── Cleanup on exit ─────────────────────────────────────────────────────────
+local function init_overlays()
+    if not sub_osd then
+        sub_osd = mp.create_osd_overlay('ass-events')
+        sub_osd.z = 0
+    end
+    if not popup_osd then
+        popup_osd = mp.create_osd_overlay('ass-events')
+        popup_osd.z = 1
+    end
+    sub_osd.res_x   = osd_w;  sub_osd.res_y   = osd_h
+    popup_osd.res_x = osd_w;  popup_osd.res_y = osd_h
+end
+
+init_overlays()
+
+mp.register_event('file-loaded', function()
+    local w = mp.get_property_number('osd-width')  or osd_w
+    local h = mp.get_property_number('osd-height') or osd_h
+    if w > 0 then osd_w = w end
+    if h > 0 then osd_h = h end
+    init_overlays()
+    if #current_tokens > 0 then render_subtitles() end
+end)
+
+mp.observe_property('osd-width', 'number', function(_, w)
+    if w and w > 0 then osd_w = w end
+    if sub_osd   then sub_osd.res_x   = osd_w end
+    if popup_osd then popup_osd.res_x = osd_w end
+    render_subtitles(); render_popup()
+end)
+
+mp.observe_property('osd-height', 'number', function(_, h)
+    if h and h > 0 then osd_h = h end
+    if sub_osd   then sub_osd.res_y   = osd_h end
+    if popup_osd then popup_osd.res_y = osd_h end
+    render_subtitles(); render_popup()
+end)
 
 mp.register_event('shutdown', function()
     if sub_osd   then sub_osd:remove()   end
     if popup_osd then popup_osd:remove() end
     if log_file  then log_file:close()   end
 end)
-
-msg.info('[jpdb] Plugin loaded (UI v2). server.js must be running at ' .. SERVER_URL)
