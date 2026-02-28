@@ -34,6 +34,7 @@ type Config struct {
 	MiningDeckID string `json:"miningDeckId"`
 	ServerPort   int    `json:"serverPort"`
 	ForqOnMine   bool   `json:"forqOnMine"`
+	CookiePath   string `json:"cookiePath"`
 }
 
 var currentConfig atomic.Pointer[Config]
@@ -54,6 +55,179 @@ func loadConfig(path string) (*Config, error) {
 }
 
 func getConfig() *Config { return currentConfig.Load() }
+
+// ─── Persistent cookie store ──────────────────────────────────────────────────
+// Loaded from cookiePath on startup; written back whenever jpdb sends a
+// Set-Cookie header so the session stays alive across server restarts.
+//
+// The cookie file may be in Netscape cookie jar format (tab-separated:
+//   domain  httpOnly  path  secure  expiry  name  value)
+// or in simple "name=value; name=value" format.
+// We detect the format automatically.
+
+var (
+	cookieMu     sync.RWMutex
+	storedCookie string // ready-to-use Cookie header value: "sid=abc; foo=bar"
+)
+
+func getCookiePath() string {
+	cfg := getConfig()
+	if cfg == nil {
+		return ""
+	}
+	return cfg.CookiePath
+}
+
+// parseNetscapeCookieJar reads a Netscape cookie jar file and returns a map
+// of cookie name → value. Lines starting with # or blank are skipped.
+// Valid lines have 7 tab-separated fields:
+//
+//	domain  includeSubdomains  path  secure  expiry  name  value
+func parseNetscapeCookieJar(data string) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.SplitN(line, "\t", 7)
+		if len(fields) == 7 {
+			name := strings.TrimSpace(fields[5])
+			value := strings.TrimSpace(fields[6])
+			if name != "" {
+				out[name] = value
+			}
+			continue
+		}
+		// Fallback: simple key=value pairs separated by semicolons
+		for _, part := range strings.Split(line, ";") {
+			part = strings.TrimSpace(part)
+			if idx := strings.IndexByte(part, '='); idx > 0 {
+				out[part[:idx]] = part[idx+1:]
+			}
+		}
+	}
+	return out
+}
+
+// cookieMapToHeader builds a Cookie request header string from a name→value map.
+func cookieMapToHeader(m map[string]string) string {
+	parts := make([]string, 0, len(m))
+	for k, v := range m {
+		parts = append(parts, k+"="+v)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// cookieMapToNetscape serialises a name→value map as a Netscape cookie jar file.
+func cookieMapToNetscape(m map[string]string) string {
+	const expiry = "4070908800" // 2099-01-01
+	lines := []string{
+		"# Netscape HTTP Cookie File",
+		"# Managed by jpdb-server.",
+		"",
+	}
+	for name, value := range m {
+		lines = append(lines, strings.Join([]string{
+			"jpdb.io", "FALSE", "/", "FALSE", expiry, name, value,
+		}, "\t"))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// parseCookieHeader extracts name=value pairs from a Set-Cookie response
+// header, discarding cookie attributes (Path, Expires, HttpOnly, etc.).
+func parseCookieHeader(setCookieValue string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(setCookieValue, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		lower := strings.ToLower(part)
+		if strings.HasPrefix(lower, "path=") || strings.HasPrefix(lower, "expires=") ||
+			strings.HasPrefix(lower, "max-age=") || strings.HasPrefix(lower, "domain=") ||
+			strings.HasPrefix(lower, "samesite=") || lower == "httponly" || lower == "secure" {
+			continue
+		}
+		if idx := strings.IndexByte(part, '='); idx > 0 {
+			out[part[:idx]] = part[idx+1:]
+		}
+	}
+	return out
+}
+
+func loadCookieFile() {
+	p := getCookiePath()
+	if p == "" {
+		return
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Log("WARN cookie load: %v", err)
+		}
+		return
+	}
+	pairs := parseNetscapeCookieJar(string(data))
+	header := cookieMapToHeader(pairs)
+	cookieMu.Lock()
+	storedCookie = header
+	cookieMu.Unlock()
+	if header != "" {
+		logger.Log("Cookie loaded (%d pairs) from %s", len(pairs), p)
+	} else {
+		logger.Log("Cookie file present but no valid cookies found in %s", p)
+	}
+}
+
+func getStoredCookie() string {
+	cookieMu.RLock()
+	defer cookieMu.RUnlock()
+	return storedCookie
+}
+
+// saveCookie merges new Set-Cookie values from a scrape response into the
+// in-memory store and persists the updated map to disk in Netscape format.
+func saveCookie(setCookieHeader string) {
+	if setCookieHeader == "" {
+		return
+	}
+	incoming := parseCookieHeader(setCookieHeader)
+	if len(incoming) == 0 {
+		return
+	}
+
+	p := getCookiePath()
+
+	// Reload existing file so we don't lose cookies we don't have in memory
+	var existing map[string]string
+	if p != "" {
+		if data, err := os.ReadFile(p); err == nil {
+			existing = parseNetscapeCookieJar(string(data))
+		}
+	}
+	if existing == nil {
+		existing = map[string]string{}
+	}
+	for k, v := range incoming {
+		existing[k] = v
+	}
+
+	header := cookieMapToHeader(existing)
+	cookieMu.Lock()
+	storedCookie = header
+	cookieMu.Unlock()
+
+	if p == "" {
+		return
+	}
+	if err := os.WriteFile(p, []byte(cookieMapToNetscape(existing)), 0600); err != nil {
+		logger.Log("WARN cookie save: %v", err)
+	} else {
+		logger.Log("Cookie saved (%d pairs) to %s", len(existing), p)
+	}
+}
 
 // ─── Async buffered logger ────────────────────────────────────────────────────
 // Log calls never block request handlers — writes go to a buffered channel
@@ -531,11 +705,14 @@ func handleReview(w http.ResponseWriter, r *http.Request) {
 
 	logger.Log("REVIEW vid=%s sid=%s rating=%s", vid, sid, body.Rating)
 
-	page, cookie, err := jpdbScrape(r.Context(), "GET",
-		fmt.Sprintf("/review?c=vf%%2C%s%%2C%s", vid, sid), "", "")
+	page, newCookie, err := jpdbScrape(r.Context(), "GET",
+		fmt.Sprintf("/review?c=vf%%2C%s%%2C%s", vid, sid), "", getStoredCookie())
 	if err != nil {
 		sendError(w, 500, err.Error())
 		return
+	}
+	if newCookie != "" {
+		saveCookie(newCookie)
 	}
 
 	matches := reviewNoRE.FindStringSubmatch(page)
@@ -545,9 +722,11 @@ func handleReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	form := fmt.Sprintf("c=vf%%2C%s%%2C%s&r=%s&g=%s", vid, sid, matches[1], grade)
-	if _, _, err = jpdbScrape(r.Context(), "POST", "/review", form, cookie); err != nil {
-		sendError(w, 500, err.Error())
+	if _, newCookie2, err2 := jpdbScrape(r.Context(), "POST", "/review", form, getStoredCookie()); err2 != nil {
+		sendError(w, 500, err2.Error())
 		return
+	} else if newCookie2 != "" {
+		saveCookie(newCookie2)
 	}
 
 	parseCache.Clear()
@@ -580,8 +759,12 @@ func handleSetFlag(w http.ResponseWriter, r *http.Request) {
 		if *body.State {
 			ep = "/prioritize"
 		}
-		_, _, err = jpdbScrape(r.Context(), "POST", ep,
-			fmt.Sprintf("v=%s&s=%s&origin=/", vid, sid), "")
+		var newCookie string
+		_, newCookie, err = jpdbScrape(r.Context(), "POST", ep,
+			fmt.Sprintf("v=%s&s=%s&origin=/", vid, sid), getStoredCookie())
+		if newCookie != "" {
+			saveCookie(newCookie)
+		}
 	} else {
 		deckMap := map[string]string{
 			"blacklist":    "blacklist",
@@ -854,10 +1037,11 @@ func main() {
 	if cfg.APIToken == "" || cfg.APIToken == "YOUR_JPDB_API_TOKEN_HERE" {
 		logger.Log("WARNING: apiToken not set in config.json — API calls will fail!")
 	}
-	logger.Log("miningDeckId=%s  forqOnMine=%v  port=%d",
-		cfg.MiningDeckID, cfg.ForqOnMine, cfg.ServerPort)
+	logger.Log("miningDeckId=%s  forqOnMine=%v  port=%d  cookiePath=%s",
+		cfg.MiningDeckID, cfg.ForqOnMine, cfg.ServerPort, cfg.CookiePath)
 
 	go watchConfig(configPath)
+	loadCookieFile()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
