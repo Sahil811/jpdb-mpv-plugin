@@ -5,11 +5,11 @@ local DS = {
     -- ======== POPUP SETTINGS ========
     -- Master dimensions for the popup
     width       = 560,    -- Max width of the popup (pixels)
-    lbar_w      = 5,      -- Width of the left state colour bar
-    pad_h       = 22,     -- Horizontal padding inside popup
-    pad_v       = 18,     -- Vertical padding inside popup
-    unit        = 8,      -- Base unit for vertical spacing
-    btn_gap     = 5,      -- Gap between action/review buttons
+    lbar_w      = 4,      -- Width of the left state colour bar (reduced from 5)
+    pad_h       = 16,     -- Horizontal padding inside popup (reduced from 22)
+    pad_v       = 12,     -- Vertical padding inside popup (reduced from 18)
+    unit        = 6,      -- Base unit for vertical spacing (reduced from 8)
+    btn_gap     = 4,      -- Gap between action/review buttons (reduced from 5)
 
     -- Surfaces (dark warm paper)
     bg_popup    = '&H0F0E0A&',   -- deepest background
@@ -50,31 +50,31 @@ local DS = {
     btn_neutral   = { bg='&H282218&', hov='&H3C3428&', act='&H504438&' },
 
     -- Typography sizes (pt, rendered by ASS font size)
-    -- Increase these values to make the text larger inside the popup
+    -- Increased button text for better readability
     fs_kanji    = 52,     -- Main spelling (Kanji)
-    fs_reading  = 24,     -- Reading (Kana) underneath spelling
+    fs_reading  = 28,     -- Reading (Kana) underneath spelling (increased from 24)
     fs_pos      = 14,     -- Part of speech label (e.g. ▸ Noun)
-    fs_gloss    = 22,     -- Meaning/English definitions
+    fs_gloss    = 24,     -- Meaning/English definitions (increased from 22)
     fs_meta     = 15,     -- Meta information
     fs_badge    = 13,     -- State badge text (e.g. Known, New)
-    fs_btn_act  = 15,     -- Action button text (Add, Blacklist)
-    fs_btn_rev  = 16,     -- Review button text (Good, Easy, etc.)
-    fs_shortcut = 12,     -- Keyboard shortcut hint text
+    fs_btn_act  = 16,     -- Action button text (increased from 15)
+    fs_btn_rev  = 17,     -- Review button text (increased from 16)
+    fs_shortcut = 11,     -- Keyboard shortcut hint text (reduced from 12)
     fs_toast    = 15,     -- Inline action feedback text
 
-    -- Line heights (px) - Should be adjusted proportionally if you increase font sizes!
-    lh_kanji    = 62,
-    lh_reading  = 30,
-    lh_pos      = 20,
-    lh_gloss    = 28,
-    lh_meta     = 20,
-    lh_badge    = 22,
-    lh_toast    = 26,
+    -- Line heights (px) - Optimized for compact layout
+    lh_kanji    = 58,     -- Reduced from 62
+    lh_reading  = 32,     -- Increased from 28 to accommodate larger reading text
+    lh_pos      = 18,     -- Reduced from 20
+    lh_gloss    = 28,     -- Increased from 26 to accommodate larger gloss text
+    lh_meta     = 18,     -- Reduced from 20
+    lh_badge    = 20,     -- Reduced from 22
+    lh_toast    = 24,     -- Reduced from 26
     divider_h   = 1,      -- Horizontal divider line thickness
 
-    -- Button heights
-    bh_action   = 34,
-    bh_review   = 42,
+    -- Button heights - More compact
+    bh_action   = 30,     -- Reduced from 34
+    bh_review   = 36,     -- Reduced from 42
 }
 
 -- ======== SUBTITLE OVERLAY SETTINGS ========
