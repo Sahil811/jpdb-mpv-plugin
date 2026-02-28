@@ -43,7 +43,9 @@ local utils   = require('mp.utils')
 
 -- ─── Debug log ────────────────────────────────────────────────────────────────
 
-local LOG_PATH = 'D:/scripts/jpdb-mpv-plugin/jpdb-debug.log'
+-- main.lua lives inside scripts/jpdb-mpv-plugin/ so the script dir IS the plugin dir.
+local PLUGIN_DIR = mp.get_script_directory()
+local LOG_PATH   = PLUGIN_DIR .. '/jpdb-debug.log'
 local log_file = io.open(LOG_PATH, 'w')
 if log_file then
     log_file:write('=== jpdb.lua v3 started ' .. os.date('%Y-%m-%dT%H:%M:%S') .. ' ===\n')
@@ -61,12 +63,86 @@ local function dlog(...)
     msg.info(line)
 end
 
-mp.add_timeout(0.5, function()
-    mp.osd_message('[jpdb v3] Plugin loaded — server.js must be running.', 4)
-end)
-
 local SERVER_URL  = 'http://127.0.0.1:9726'
 local FONT_FAMILY = 'Yu Gothic UI'
+
+-- ─── Server auto-start ────────────────────────────────────────────────────────
+-- Finds jpdb-server.exe next to this script, launches it if the server is not
+-- already listening on SERVER_URL, then registers this MPV instance.
+-- Multiple MPV windows share the same server process safely.
+
+-- jpdb-server.exe lives in the jpdb-mpv-plugin subfolder.
+local SERVER_BIN = PLUGIN_DIR .. '/jpdb-server.exe'
+
+local function server_ping(on_result)
+    -- Quick /status check; on_result(true) if server is up, on_result(false) otherwise
+    mp.command_native_async({
+        name='subprocess',
+        args={'curl','-s','--max-time','2', SERVER_URL..'/status'},
+        capture_stdout=true, capture_stderr=true, playback_only=false,
+    }, function(success, res)
+        on_result(success and res and res.status == 0 and res.stdout ~= '')
+    end)
+end
+
+local function register_with_server()
+    mp.command_native_async({
+        name='subprocess',
+        args={'curl','-s','-X','POST','--max-time','5', SERVER_URL..'/register'},
+        capture_stdout=true, capture_stderr=true, playback_only=false,
+    }, function(success, res)
+        if success and res and res.status == 0 then
+            dlog('[jpdb] Registered with server')
+        else
+            dlog('[jpdb] WARNING: could not register with server')
+        end
+    end)
+end
+
+local function launch_server_then_register()
+    dlog('[jpdb] Starting jpdb-server.exe...')
+    -- detached=true so the process outlives this Lua call;
+    -- playback_only=false so it keeps running even when paused.
+    mp.command_native_async({
+        name='subprocess',
+        args={SERVER_BIN},
+        detach=true, playback_only=false,
+    }, function() end)   -- fire and forget
+
+    -- Poll until the server responds (up to ~5 s)
+    local attempts = 0
+    local function poll()
+        attempts = attempts + 1
+        server_ping(function(up)
+            if up then
+                dlog('[jpdb] Server is up after ' .. attempts .. ' poll(s)')
+                register_with_server()
+                mp.osd_message('[jpdb] Server started ✓', 2)
+            elseif attempts < 20 then
+                mp.add_timeout(0.3, poll)
+            else
+                dlog('[jpdb] ERROR: server did not start in time')
+                mp.osd_message('[jpdb] ERROR: server failed to start!', 5)
+            end
+        end)
+    end
+    mp.add_timeout(0.5, poll)   -- give the process a moment before first ping
+end
+
+-- On mpv startup: check if server is running; if yes just register,
+-- if no launch it first.
+mp.add_timeout(0.3, function()
+    server_ping(function(up)
+        if up then
+            dlog('[jpdb] Server already running — registering')
+            register_with_server()
+            mp.osd_message('[jpdb v3] JPDB ready ✔', 2)
+        else
+            launch_server_then_register()
+        end
+    end)
+end)
+
 
 
 -- ══════════════════════════════════════════════════════════════════════════════
@@ -1240,6 +1316,12 @@ mp.observe_property('osd-height', 'number', function(_, h)
 end)
 
 mp.register_event('shutdown', function()
+    -- Unregister this MPV instance; server shuts itself down when count → 0
+    mp.command_native({
+        name='subprocess',
+        args={'curl','-s','-X','POST','--max-time','3', SERVER_URL..'/unregister'},
+        capture_stdout=false, capture_stderr=false, playback_only=false,
+    })
     if sub_osd   then sub_osd:remove()   end
     if popup_osd then popup_osd:remove() end
     if log_file  then log_file:close()   end

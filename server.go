@@ -27,6 +27,36 @@ import (
 	"time"
 )
 
+// ─── MPV instance counter ─────────────────────────────────────────────────────
+// Each MPV window calls POST /register on startup and POST /unregister on
+// shutdown. When the count drops to zero the server exits gracefully so it
+// doesn't linger after the last player closes.
+
+var (
+	mpvCount   int64          // atomic — current number of live MPV instances
+	shutdownCh = make(chan struct{}) // closed to trigger graceful shutdown
+)
+
+func handleRegister(w http.ResponseWriter, r *http.Request) {
+	n := atomic.AddInt64(&mpvCount, 1)
+	logger.Log("MPV registered (total=%d)", n)
+	sendJSON(w, 200, map[string]any{"ok": true, "mpv_count": n})
+}
+
+func handleUnregister(w http.ResponseWriter, r *http.Request) {
+	n := atomic.AddInt64(&mpvCount, -1)
+	if n < 0 {
+		atomic.StoreInt64(&mpvCount, 0)
+		n = 0
+	}
+	logger.Log("MPV unregistered (total=%d)", n)
+	sendJSON(w, 200, map[string]any{"ok": true, "mpv_count": n})
+	if n == 0 {
+		logger.Log("Last MPV instance closed — shutting down server")
+		close(shutdownCh)
+	}
+}
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 type Config struct {
@@ -1065,6 +1095,8 @@ func main() {
 	mux.HandleFunc("POST /set-flag", handleSetFlag)
 	mux.HandleFunc("POST /mine", handleMine)
 	mux.HandleFunc("POST /lookup", handleLookup)
+	mux.HandleFunc("POST /register", handleRegister)
+	mux.HandleFunc("POST /unregister", handleUnregister)
 
 	handler := logMiddleware(corsMiddleware(mux))
 
@@ -1077,12 +1109,16 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Graceful shutdown on Ctrl+C / SIGTERM
+	// Graceful shutdown on Ctrl+C / SIGTERM / last MPV closes
 	go func() {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-		<-quit
-		logger.Log("Shutting down gracefully...")
+		select {
+		case <-quit:
+			logger.Log("Signal received — shutting down gracefully...")
+		case <-shutdownCh:
+			logger.Log("All MPV instances closed — shutting down gracefully...")
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
