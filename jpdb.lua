@@ -1,14 +1,18 @@
 --[[
     jpdb.lua — JPDB MPV Plugin  (UI/UX v2 — Google-level redesign)
-    OPTIMIZED: throttled mouse, memoized subtitle ASS, string pooling,
-               batched OSD, lazy dlog, removed redundant renders.
-    UX FIXES: Hover debouncing, popup safe-zones, strict hit-testing.
+    OPTIMIZED : throttled mouse, memoized subtitle ASS, string pooling,
+                batched OSD, lazy dlog, removed redundant renders.
+    UX FIXES  : Hover debouncing, popup safe-zones, strict hit-testing.
+    ACCURACY  : Per-line byte→pixel offset maps with East-Asian-Width
+                heuristics replace the old fixed CHAR_PX×char-count math.
+                Half-width chars (ASCII, Latin) = 26 px; CJK/Kana = 48 px.
 ]]
 
-local mp         = require('mp')
-local msg        = require('mp.msg')
-local assdraw    = require('mp.assdraw')
-local utils      = require('mp.utils')
+local mp      = require('mp')
+local msg     = require('mp.msg')
+local assdraw = require('mp.assdraw')
+local utils   = require('mp.utils')
+
 
 -- ─── Debug log ───────────────────────────────────────────────────────────────
 local LOG_PATH = 'D:/scripts/jpdb-mpv-plugin/jpdb-debug.log'
@@ -19,7 +23,6 @@ if log_file then
     log_file:flush()
 end
 
--- PERF: only call os.date() when log_file is open (avoids syscall every line)
 local function dlog(...)
     if not log_file and not msg then return end
     local parts = {}
@@ -38,6 +41,7 @@ end)
 
 local SERVER_URL  = 'http://127.0.0.1:9726'
 local FONT_FAMILY = 'Yu Gothic UI'
+
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- ─── Design System ────────────────────────────────────────────────────────────
@@ -112,7 +116,7 @@ local STATE_COLORS = {
     ['redundant']    = '&HAAAABC&',
 }
 
-local STATE_ALPHA = { ['not-in-deck'] = '&H88&' }
+local STATE_ALPHA  = { ['not-in-deck'] = '&H88&' }
 
 local STATE_LABELS = {
     ['known']        = 'Known',
@@ -128,7 +132,8 @@ local STATE_LABELS = {
     ['redundant']    = 'Redundant',
 }
 
--- ─── State ──────────────────────────────────────────────────────────────────
+
+-- ─── State ───────────────────────────────────────────────────────────────────
 
 local current_tokens   = {}
 local current_text     = ''
@@ -144,20 +149,19 @@ local popup_osd        = nil
 local sub_osd          = nil
 local popup_buttons    = {}
 local hovered_button   = nil
-local popup_rect       = nil  -- Bounding box to lock hover when moving to menu
+local popup_rect       = nil
 
--- Debounce tracking states
 local hover_pending_token  = nil
 local hover_debounce_timer = nil
 
 local osd_w = 1280
 local osd_h = 720
 
--- PERF: cache last subtitle ASS string to avoid redundant rebuilds
 local cached_sub_ass      = nil
-local cached_sub_token_id = nil  -- lightweight "identity" of tokens+hover
+local cached_sub_token_id = nil
 
--- ─── HTTP helpers ───────────────────────────────────────────────────────────
+
+-- ─── HTTP helpers ────────────────────────────────────────────────────────────
 
 local function http_request(method, path, body_table)
     local body_json = body_table and utils.format_json(body_table) or ''
@@ -167,10 +171,7 @@ local function http_request(method, path, body_table)
         '-H', 'Content-Type: application/json',
         SERVER_URL .. path,
     }
-    if body_json ~= '' then
-        args[#args+1] = '-d'
-        args[#args+1] = body_json
-    end
+    if body_json ~= '' then args[#args+1] = '-d'; args[#args+1] = body_json end
     local res = mp.command_native({
         name = 'subprocess', args = args,
         capture_stdout = true, capture_stderr = true, playback_only = false,
@@ -197,10 +198,7 @@ local function http_request_async(method, path, body_table, on_done)
         '-H', 'Content-Type: application/json',
         SERVER_URL .. path,
     }
-    if body_json ~= '' then
-        args[#args+1] = '-d'
-        args[#args+1] = body_json
-    end
+    if body_json ~= '' then args[#args+1] = '-d'; args[#args+1] = body_json end
     mp.command_native_async({
         name = 'subprocess', args = args,
         capture_stdout = true, capture_stderr = true, playback_only = false,
@@ -219,11 +217,67 @@ local function http_request_async(method, path, body_table, on_done)
     end)
 end
 
--- ─── UTF-8 character utilities ───────────────────────────────────────────────
 
+-- ══════════════════════════════════════════════════════════════════════════════
+-- ─── UTF-8 / Unicode Width Utilities ─────────────────────────────────────────
+-- ══════════════════════════════════════════════════════════════════════════════
+--
+-- KEY ACCURACY IMPROVEMENT OVER v1:
+-- Instead of char_count × CHAR_PX (which assumed every glyph is the same
+-- pixel width), we build a per-line byte→pixel offset table.  Each character
+-- is classified as full-width (~48 px) or half-width (~26 px) based on its
+-- UTF-8 lead byte, which directly encodes the Unicode block:
+--
+--   ASCII  (1-byte, 0x00..0x7F)         → half-width  (Latin letters, digits)
+--   2-byte (0x80..0x7FF)                → half-width  (Latin ext, Greek, etc.)
+--   3-byte lead 0xE0..0xE2 (U+0800..U+2FFF) → half-width  (rare: Georgian, etc.)
+--   3-byte lead 0xE3..0xEF (U+3000..U+FFFF) → full-width  (Hiragana, Katakana,
+--                                              CJK ideographs, full-width Latin)
+--   4-byte (U+10000+)                   → full-width  (CJK Extensions B-G, etc.)
+--
+-- This covers all normal Japanese subtitle content correctly.
+
+local CHAR_PX_FULL = 48   -- full-width: CJK, Hiragana, Katakana, full-width punct
+local CHAR_PX_HALF = 26   -- half-width: ASCII, Latin, numbers, half-width punct
+local LINE_HEIGHT  = 58   -- vertical line spacing (px)
+
+-- Returns (pixel_width_of_char, index_of_next_byte) for char at 1-indexed byte i.
+local function utf8_char_px(s, i)
+    local b = s:byte(i)
+    if     b < 0x80 then return CHAR_PX_HALF, i + 1   -- ASCII
+    elseif b < 0xE0 then return CHAR_PX_HALF, i + 2   -- 2-byte Latin/Greek
+    elseif b < 0xF0 then
+        -- 3-byte: full-width only from lead byte E3 onward (U+3000+)
+        return (b >= 0xE3) and CHAR_PX_FULL or CHAR_PX_HALF, i + 3
+    else             return CHAR_PX_FULL,    i + 4     -- 4-byte CJK ext.
+    end
+end
+
+-- Build a byte→pixel offset map for one line of text.
+-- offsets[k] = cumulative pixel width of all characters whose UTF-8 encoding
+--              starts BEFORE byte index k (1-indexed).
+-- offsets[#line_text + 1] = total pixel width of the line (sentinel).
+--
+-- Usage:  pixel_start_of_token = offsets[token_byte_offset_in_line + 1]
+--         (token byte offset is 0-indexed → add 1 for Lua tables)
+local function build_line_px_map(line_text)
+    local offsets = {}
+    local i, px  = 1, 0
+    local len     = #line_text
+    while i <= len do
+        offsets[i]     = px
+        local cw, ni   = utf8_char_px(line_text, i)
+        px             = px + cw
+        i              = ni
+    end
+    offsets[len + 1] = px   -- sentinel: total line pixel width
+    return offsets, px
+end
+
+-- utf8_len is still used by wrap_text and popup badge spacing.
 local function utf8_len(s)
     local n, i = 0, 1
-    local len = #s
+    local len   = #s
     while i <= len do
         local b = s:byte(i)
         if     b < 0x80 then i = i + 1
@@ -235,33 +289,16 @@ local function utf8_len(s)
     return n
 end
 
-local function utf8_byte_to_char(s, byte_pos)
-    local n, i = 0, 1
-    while i <= byte_pos do
-        local b = s:byte(i)
-        if     b < 0x80 then i = i + 1
-        elseif b < 0xE0 then i = i + 2
-        elseif b < 0xF0 then i = i + 3
-        else                 i = i + 4 end
-        n = n + 1
-    end
-    return n
-end
-
+-- Split text into lines, recording byte offsets for hit-test lookup.
 local function split_text_lines(text)
     local result = {}
-    local i, line_start, chars_before = 1, 1, 0
+    local i, line_start = 1, 1
     local len = #text
     while i <= len do
         local b = text:byte(i)
         if b == 10 then
             local line_text = text:sub(line_start, i - 1)
-            result[#result+1] = {
-                text         = line_text,
-                byte_start   = line_start - 1,
-                chars_before = chars_before,
-            }
-            chars_before = chars_before + utf8_len(line_text) + 1
+            result[#result+1] = { text = line_text, byte_start = line_start - 1 }
             line_start = i + 1
             i = i + 1
         else
@@ -271,15 +308,12 @@ local function split_text_lines(text)
             else                 i = i + 4 end
         end
     end
-    result[#result+1] = {
-        text         = text:sub(line_start),
-        byte_start   = line_start - 1,
-        chars_before = chars_before,
-    }
+    result[#result+1] = { text = text:sub(line_start), byte_start = line_start - 1 }
     return result
 end
 
--- ─── ASS helpers ────────────────────────────────────────────────────────────
+
+-- ─── ASS helpers ─────────────────────────────────────────────────────────────
 
 local function ass_escape(s)
     if not s then return '' end
@@ -311,7 +345,8 @@ local function ass_text_center(events, cx, cy, font, size, bold, color, alpha, t
         cx, cy, font, size, bold and 1 or 0, color, alpha, ass_escape(text))
 end
 
--- ─── Get primary token state ─────────────────────────────────────────────────
+
+-- ─── Get primary token state ──────────────────────────────────────────────────
 
 local function get_primary_state(card_state)
     if not card_state or #card_state == 0 then return 'not-in-deck' end
@@ -321,7 +356,8 @@ local function get_primary_state(card_state)
     return card_state[1] or 'not-in-deck'
 end
 
--- ─── Subtitle overlay ───────────────────────────────────────────────────────
+
+-- ─── Subtitle overlay ────────────────────────────────────────────────────────
 
 local function build_subtitle_ass(tokens, raw_text)
     if not tokens or #tokens == 0 then return nil end
@@ -331,8 +367,7 @@ local function build_subtitle_ass(tokens, raw_text)
 
     for _, tok in ipairs(tokens) do
         if tok.start > last then
-            local pre = raw_text:sub(last + 1, tok.start)
-            parts[#parts+1] = '{\\c&HFFFFFF&\\1a&H00&}' .. ass_escape(pre)
+            parts[#parts+1] = '{\\c&HFFFFFF&\\1a&H00&}' .. ass_escape(raw_text:sub(last + 1, tok.start))
         end
         local state = get_primary_state(tok.card.state)
         local color = STATE_COLORS[state] or '&HFFFFFF&'
@@ -350,9 +385,6 @@ local function build_subtitle_ass(tokens, raw_text)
     return table.concat(parts)
 end
 
-local CHAR_PX     = 48
-local LINE_HEIGHT = 58
-
 local function subtitle_layout()
     local sub_y = osd_h - 100
     local lines = split_text_lines(current_text)
@@ -363,11 +395,9 @@ end
 local function render_subtitles()
     if not sub_osd then return end
     subtitle_regions = {}
+
     if #current_tokens == 0 then
-        if sub_osd.data ~= '' then
-            sub_osd.data = ''
-            sub_osd:update()
-        end
+        if sub_osd.data ~= '' then sub_osd.data = ''; sub_osd:update() end
         return
     end
 
@@ -376,7 +406,7 @@ local function render_subtitles()
     if cached_sub_token_id == token_id and cached_sub_ass then
         ass_content = cached_sub_ass
     else
-        ass_content = build_subtitle_ass(current_tokens, current_text)
+        ass_content     = build_subtitle_ass(current_tokens, current_text)
         cached_sub_ass      = ass_content
         cached_sub_token_id = token_id
     end
@@ -389,24 +419,40 @@ local function render_subtitles()
     local layout = subtitle_layout()
     local sub_x  = math.floor(osd_w / 2)
 
+    -- ── ACCURACY FIX ──────────────────────────────────────────────────────────
+    -- For every subtitle line, build a byte→pixel map so that token boundaries
+    -- are mapped to exact pixel positions instead of char_count × CHAR_PX.
+    -- This eliminates drift on mixed CJK/ASCII content.
     for line_idx, ln in ipairs(layout.lines) do
         local from_bottom = layout.n - line_idx
         local line_bottom = layout.sub_y - from_bottom * LINE_HEIGHT
-        local y1 = line_bottom - CHAR_PX - 6
+        local y1 = line_bottom - CHAR_PX_FULL - 6
         local y2 = line_bottom + 10
-        local line_nch  = utf8_len(ln.text)
-        local line_w    = line_nch * CHAR_PX
-        local line_left = sub_x - line_w / 2
-        local lbs = ln.byte_start
-        local lbe = lbs + #ln.text
+
+        -- Build per-line offset table and derive line centre from true pixel width.
+        local px_map, total_px = build_line_px_map(ln.text)
+        local line_left        = sub_x - total_px / 2
+
+        local lbs = ln.byte_start              -- 0-indexed byte start in current_text
+        local lbe = lbs + #ln.text             -- 0-indexed byte just past line end
+
         for _, tok in ipairs(current_tokens) do
+            -- Only include tokens that start and end within this line.
             if tok.start >= lbs and tok['end'] <= lbe + 1 then
-                local ci_start = utf8_byte_to_char(current_text, tok.start)  - ln.chars_before
-                local ci_end   = utf8_byte_to_char(current_text, tok['end']) - ln.chars_before
+                -- Convert 0-indexed absolute byte offsets → 1-indexed byte offsets
+                -- within the line string, then look up pixel positions.
+                local local_start = tok.start - lbs        -- 0-indexed in ln.text
+                local local_end   = tok['end'] - lbs       -- 0-indexed in ln.text
+
+                local px_start = px_map[local_start + 1] or 0
+                local px_end   = px_map[local_end   + 1] or total_px
+
                 subtitle_regions[#subtitle_regions+1] = {
-                    x1=math.floor(line_left + ci_start * CHAR_PX),
-                    x2=math.floor(line_left + ci_end   * CHAR_PX),
-                    y1=y1, y2=y2, token=tok
+                    x1    = math.floor(line_left + px_start),
+                    x2    = math.floor(line_left + px_end),
+                    y1    = y1,
+                    y2    = y2,
+                    token = tok,
                 }
             end
         end
@@ -425,8 +471,9 @@ local function render_subtitles()
     end
 end
 
+
 -- ══════════════════════════════════════════════════════════════════════════════
--- ─── POPUP RENDERING  ─────────────────────────────────────────────────────────
+-- ─── POPUP RENDERING ──────────────────────────────────────────────────────────
 -- ══════════════════════════════════════════════════════════════════════════════
 
 local PARTS_OF_SPEECH = {
@@ -457,8 +504,7 @@ local function wrap_text(text, max_chars)
         local wl = utf8_len(word)
         if cur_len > 0 and cur_len + 1 + wl > max_chars then
             lines[#lines+1] = table.concat(cur, ' ')
-            cur = { word }
-            cur_len = wl
+            cur = { word }; cur_len = wl
         else
             cur[#cur+1] = word
             cur_len = cur_len + (cur_len > 0 and 1 or 0) + wl
@@ -498,10 +544,10 @@ local function render_popup()
     local state   = get_primary_state(card.state)
     local s_color = STATE_COLORS[state] or '&HFFFFFF&'
 
-    local W         = DS.width
-    local LB        = DS.lbar_w
-    local PAD       = DS.pad_h
-    local content_x = LB + PAD
+    local W          = DS.width
+    local LB         = DS.lbar_w
+    local PAD        = DS.pad_h
+    local content_x  = LB + PAD
     local WRAP_CHARS = 42
 
     local function measure_h()
@@ -523,9 +569,8 @@ local function render_popup()
     end
 
     local total_h = measure_h()
-
-    local layout = subtitle_layout()
-    local py = math.max(8, layout.sub_text_top - DS.unit - total_h)
+    local layout  = subtitle_layout()
+    local py      = math.max(8, layout.sub_text_top - DS.unit - total_h)
 
     local tok_cx = hover_x
     for _, region in ipairs(subtitle_regions) do
@@ -535,12 +580,10 @@ local function render_popup()
         end
     end
     local px = math.max(8, math.min(tok_cx - W / 2, osd_w - W - 8))
-    
-    -- Save exact dimensions to lock interactions to the popup
+
     popup_rect = { x1 = px, y1 = py, x2 = px + W, y2 = py + total_h }
 
-    local bg_ev = {}
-    local fg_ev = {}
+    local bg_ev, fg_ev = {}, {}
 
     ass_rect(bg_ev, px + 6, py + 8, W, total_h, DS.shadow_col, '&HCC&')
     ass_rect(bg_ev, px + 3, py + 4, W, total_h, DS.shadow_col, '&H88&')
@@ -556,11 +599,11 @@ local function render_popup()
     local cx = px + content_x
     local cy = py + DS.pad_v
 
-    ass_text(fg_ev, cx, cy, FONT_FAMILY, DS.fs_kanji, true, s_color, '&H00&', ass_escape(card.spelling))
+    ass_text(fg_ev, cx, cy, FONT_FAMILY, DS.fs_kanji, true, s_color, '&H00&', card.spelling)
     cy = cy + DS.lh_kanji
 
     if card.spelling ~= card.reading then
-        ass_text(fg_ev, cx, cy, FONT_FAMILY, DS.fs_reading, false, DS.col_dim, '&H00&', ass_escape(card.reading))
+        ass_text(fg_ev, cx, cy, FONT_FAMILY, DS.fs_reading, false, DS.col_dim, '&H00&', card.reading)
         cy = cy + DS.lh_reading
     end
 
@@ -568,7 +611,7 @@ local function render_popup()
     for _, s in ipairs(card.state) do
         local sc    = STATE_COLORS[s] or '&H888888&'
         local label = STATE_LABELS[s] or s
-        ass_text(fg_ev, badge_x, cy, FONT_FAMILY, DS.fs_meta, false, sc, '&H00&', '● ' .. ass_escape(label))
+        ass_text(fg_ev, badge_x, cy, FONT_FAMILY, DS.fs_meta, false, sc, '&H00&', '● ' .. label)
         badge_x = badge_x + utf8_len(label) * 10 + 30
     end
     if card.frequencyRank then
@@ -586,7 +629,7 @@ local function render_popup()
         local pos_label = get_pos_label(m.partOfSpeech)
         if pos_label ~= '' and pos_label ~= last_pos then
             ass_text(fg_ev, cx, cy, FONT_FAMILY, DS.fs_pos, false, DS.col_chip, '&H00&',
-                '▸ ' .. ass_escape(pos_label))
+                '▸ ' .. pos_label)
             cy = cy + DS.lh_pos
             last_pos = pos_label
         end
@@ -596,7 +639,7 @@ local function render_popup()
             local prefix   = (li == 1) and (tostring(i) .. '.  ') or '    '
             local text_col = (i % 2 == 0) and '&HE0E0F0&' or DS.col_white
             ass_text(fg_ev, cx, cy, FONT_FAMILY, DS.fs_gloss, false, text_col, '&H00&',
-                ass_escape(prefix .. wline))
+                prefix .. wline)
             cy = cy + DS.lh_gloss
         end
         shown = shown + 1
@@ -624,7 +667,7 @@ local function render_popup()
 
     local blacklisted, never_forgott = false, false
     for _, s in ipairs(card.state) do
-        if s == 'blacklisted'  then blacklisted  = true end
+        if s == 'blacklisted'  then blacklisted   = true end
         if s == 'never-forget' then never_forgott = true end
     end
 
@@ -654,9 +697,9 @@ local function render_popup()
     end
 
     local all = {}
-    local nb = #bg_ev
-    for i = 1, nb         do all[i]    = bg_ev[i] end
-    for i = 1, #fg_ev     do all[nb+i] = fg_ev[i] end
+    local nb  = #bg_ev
+    for i = 1, nb      do all[i]    = bg_ev[i] end
+    for i = 1, #fg_ev  do all[nb+i] = fg_ev[i] end
 
     local new_data = table.concat(all, '\n')
     if popup_osd.data ~= new_data then
@@ -665,32 +708,31 @@ local function render_popup()
     end
 end
 
+
 -- ─── Mouse position → subtitle token mapping ─────────────────────────────────
 
 local function find_hovered_token(mx, my)
-    -- Pass 1: Strict strict bounding-box test for perfect accuracy
+    -- Pass 1: exact bounding-box hit
     for _, region in ipairs(subtitle_regions) do
-        if my >= region.y1 and my <= region.y2 then
-            if mx >= region.x1 and mx <= region.x2 then
-                return region.token
-            end
+        if my >= region.y1 and my <= region.y2
+        and mx >= region.x1 and mx <= region.x2 then
+            return region.token
         end
     end
-    
-    -- Pass 2: Fallback to proximity (within 8px buffer)
+    -- Pass 2: 8-px proximity fallback (handles inter-character gaps)
     local best_tok, best_dist = nil, math.huge
     for _, region in ipairs(subtitle_regions) do
-        if my >= region.y1 and my <= region.y2 then
-            if mx >= region.x1 - 8 and mx <= region.x2 + 8 then
-                local dist = math.abs(mx - (region.x1 + region.x2) * 0.5)
-                if dist < best_dist then best_dist = dist; best_tok = region.token end
-            end
+        if my >= region.y1 and my <= region.y2
+        and mx >= region.x1 - 8 and mx <= region.x2 + 8 then
+            local dist = math.abs(mx - (region.x1 + region.x2) * 0.5)
+            if dist < best_dist then best_dist = dist; best_tok = region.token end
         end
     end
     return best_tok
 end
 
--- ─── Button hit testing ──────────────────────────────────────────────────────
+
+-- ─── Button hit testing ───────────────────────────────────────────────────────
 
 local function find_hovered_button(mx, my)
     for _, btn in ipairs(popup_buttons) do
@@ -701,7 +743,8 @@ local function find_hovered_button(mx, my)
     return nil
 end
 
--- ─── Actions ─────────────────────────────────────────────────────────────────
+
+-- ─── Actions ──────────────────────────────────────────────────────────────────
 
 local function show_toast(msg_text, duration_ms)
     mp.osd_message(msg_text, (duration_ms or 2000) / 1000)
@@ -719,8 +762,7 @@ local function refresh_after_action()
                 for _, tok in ipairs(current_tokens) do
                     if tok.card.vid == popup_token.card.vid and
                        tok.card.sid == popup_token.card.sid then
-                        popup_token = tok
-                        break
+                        popup_token = tok; break
                     end
                 end
                 render_popup()
@@ -755,7 +797,8 @@ local function do_set_flag(card, flag, state)
         { vid = card.vid, sid = card.sid, flag = flag, state = state },
         function(data, err)
             if err then show_toast('Flag failed: ' .. err)
-            else show_toast('✓ ' .. (state and 'Added ' or 'Removed ') .. flag); refresh_after_action() end
+            else show_toast('✓ ' .. (state and 'Added ' or 'Removed ') .. flag)
+                 refresh_after_action() end
         end)
 end
 
@@ -768,7 +811,8 @@ local function dispatch_button(btn)
     end
 end
 
--- ─── Subtitle observation ────────────────────────────────────────────────────
+
+-- ─── Subtitle observation ─────────────────────────────────────────────────────
 
 local parse_timer = nil
 
@@ -778,12 +822,11 @@ local function on_subtitle_change(_, new_text)
 
     if hover_debounce_timer then hover_debounce_timer:kill(); hover_debounce_timer = nil end
     hover_pending_token = nil
-    
-    hovered_token = nil
-    popup_visible = false
-    popup_token   = nil
-    popup_buttons = {}
-    popup_rect    = nil
+    hovered_token  = nil
+    popup_visible  = false
+    popup_token    = nil
+    popup_buttons  = {}
+    popup_rect     = nil
     subtitle_regions    = {}
     cached_sub_ass      = nil
     cached_sub_token_id = nil
@@ -810,8 +853,8 @@ local function on_subtitle_change(_, new_text)
                 cached_sub_token_id = nil
                 render_subtitles()
                 if hovered_token then
-                    popup_token    = hovered_token
-                    popup_visible  = true
+                    popup_token   = hovered_token
+                    popup_visible = true
                     hovered_button = nil
                     render_popup()
                 end
@@ -824,7 +867,8 @@ mp.observe_property('sub-text', 'string', on_subtitle_change)
 mp.set_property('sub-visibility', 'no')
 mp.set_property('secondary-sub-visibility', 'no')
 
--- ─── Pause / resume helpers ─────────────────────────────────────────────────
+
+-- ─── Pause / resume helpers ──────────────────────────────────────────────────
 
 local function jpdb_pause()
     if not jpdb_did_pause and not mp.get_property_bool('pause') then
@@ -849,10 +893,7 @@ local function close_popup()
     popup_rect     = nil
     hovered_button = nil
     hovered_token  = nil
-    if hover_debounce_timer then
-        hover_debounce_timer:kill()
-        hover_debounce_timer = nil
-    end
+    if hover_debounce_timer then hover_debounce_timer:kill(); hover_debounce_timer = nil end
     hover_pending_token = nil
     render_popup()
     render_subtitles()
@@ -860,7 +901,8 @@ local function close_popup()
     if toggle_click_bindings then toggle_click_bindings(false) end
 end
 
--- ─── Mouse tracking ──────────────────────────────────────────────────────────
+
+-- ─── Mouse tracking ───────────────────────────────────────────────────────────
 
 local mouse_timer = nil
 
@@ -874,40 +916,33 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
         mouse_timer = nil
         local mx, my = hover_x, hover_y
 
-        -- 1. Check if we are inside the popup menu (safe-zone)
+        -- 1. Popup safe-zone: keep hover locked while inside the card.
         if popup_visible and popup_rect then
-            local pad = 15 -- pixel buffer around popup box
+            local pad = 15
             if mx >= popup_rect.x1 - pad and mx <= popup_rect.x2 + pad and
                my >= popup_rect.y1 - pad and my <= popup_rect.y2 + pad then
-               
-                -- Interacting with the popup -> lock the hover state
                 if hover_debounce_timer then hover_debounce_timer:kill(); hover_debounce_timer = nil end
                 hover_pending_token = nil
-
                 local btn     = find_hovered_button(mx, my)
                 local new_key = btn and btn.key or nil
                 if new_key ~= hovered_button then
                     hovered_button = new_key
                     render_popup()
                 end
-                return -- Skip subtitle token checks
+                return
             end
         end
 
-        -- 2. Check if we are generally in the interactive UI zone
+        -- 2. Guard: only process if inside the subtitle interaction zone.
         local layout  = subtitle_layout()
         local zone_y1 = math.max(0, layout.sub_text_top - 500)
         local zone_y2 = layout.sub_y + 40
-        local in_zone = (my >= zone_y1 and my <= zone_y2)
-
-        if not in_zone then
-            if popup_visible or hovered_token then
-                close_popup()
-            end
+        if my < zone_y1 or my > zone_y2 then
+            if popup_visible or hovered_token then close_popup() end
             return
         end
 
-        -- 3. Token hit testing with Debounce
+        -- 3. Token hit-testing with debounce.
         local new_token = find_hovered_token(mx, my)
 
         if new_token ~= hovered_token then
@@ -915,13 +950,12 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                 hover_pending_token = new_token
                 if hover_debounce_timer then hover_debounce_timer:kill() end
 
-                -- Quick trigger if entering a word; slight grace period when leaving
-                local delay = new_token and 0.15 or 0.25 
+                local delay = new_token and 0.15 or 0.25
 
                 hover_debounce_timer = mp.add_timeout(delay, function()
                     hover_debounce_timer = nil
-                    hovered_token = hover_pending_token
-                    cached_sub_ass = nil
+                    hovered_token       = hover_pending_token
+                    cached_sub_ass      = nil
                     cached_sub_token_id = nil
                     render_subtitles()
 
@@ -938,11 +972,8 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                 end)
             end
         else
-            -- We are still on the active token, cancel any pending changes
             if hover_debounce_timer then hover_debounce_timer:kill(); hover_debounce_timer = nil end
             hover_pending_token = nil
-
-            -- Clear hovered button if we drifted off the popup back onto the token
             if popup_visible and hovered_button ~= nil then
                 hovered_button = nil
                 render_popup()
@@ -951,7 +982,8 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
     end)
 end)
 
--- ─── Mouse clicks & Overlays setup (Remaining boilerplate) ───────────────────
+
+-- ─── Mouse clicks & Overlay setup ────────────────────────────────────────────
 
 local clicks_bound = false
 
@@ -971,7 +1003,7 @@ end
 
 toggle_click_bindings = function(enable)
     if enable and not clicks_bound then
-        mp.add_forced_key_binding('MBTN_LEFT', 'jpdb-click', handle_left_click, { complex = true })
+        mp.add_forced_key_binding('MBTN_LEFT',     'jpdb-click',     handle_left_click, { complex = true })
         mp.add_forced_key_binding('MBTN_LEFT_DBL', 'jpdb-dbl-click', handle_left_dbl_click)
         clicks_bound = true
     elseif not enable and clicks_bound then
@@ -1034,6 +1066,9 @@ mp.add_key_binding('n', 'jpdb-never-forget', function()
     for _, s in ipairs(tok.card.state) do if s == 'never-forget' then is_nf = true end end
     do_set_flag(tok.card, 'never-forget', not is_nf)
 end)
+
+
+-- ─── Overlay init & OSD resize tracking ──────────────────────────────────────
 
 local function init_overlays()
     if not sub_osd then
