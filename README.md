@@ -2,13 +2,16 @@
 
 Replicates [jpdb-breader](https://github.com/hmry/jpdb-breader) Chrome extension functionality inside mpv — color-coded Japanese subtitles, interactive hover popup, review buttons, and sentence mining — **all within mpv, no browser required**.
 
+> **Zero manual setup** — the server starts and stops automatically with mpv. Open mpv, watch, close mpv. That's it.
+
 ## Features
 
-- 🎨 **Color-coded subtitles** — words colored by jpdb state (known/new/due/failed/etc.)
-- 💬 **Hover popup inside mpv** — click any word to see its dictionary entry
+- 🎨 **Color-coded subtitles** — words colored by jpdb state (known / new / due / failed / etc.)
+- 💬 **Hover popup** — hover any word to see its dictionary entry, reading, and part of speech
 - ✅ **Review buttons** — Nothing / Something / Hard / Good / Easy (clickable in popup)
 - ⛏️ **Mine buttons** — Add to deck, Blacklist, Never Forget (clickable in popup)
-- ⌨️ **Keyboard shortcuts** — for all actions without using the mouse
+- ⌨️ **Keyboard shortcuts** — 1–5 for review grades, A / B / N for actions
+- 🚀 **Auto server lifecycle** — server starts when the first mpv opens, stops when the last mpv closes. Multiple mpv windows share one server automatically.
 
 ## Color Coding
 
@@ -16,120 +19,137 @@ Replicates [jpdb-breader](https://github.com/hmry/jpdb-breader) Chrome extension
 |---|---|
 | Known / Never Forget | 🟢 Green |
 | Learning | 🟩 Teal |
-| New | 🔵 Blue |
-| Not In Deck | 🔵 Blue (50%) |
-| Due | 🟠 Orange |
+| New / Not in Deck | 🟠 Orange |
+| Due | 🔵 Blue |
 | Failed | 🔴 Red |
 | Locked / Suspended / Blacklisted | ⚫ Gray |
 
 ## Requirements
 
 - [mpv](https://mpv.io/) (any recent version)
-- [Node.js](https://nodejs.org/) (v16 or later)
+- [Go](https://go.dev/) 1.22+ (only needed to build `jpdb-server.exe`)
 - A [jpdb.io](https://jpdb.io) account with an API token
-- `curl` available in your PATH (comes with Windows 10+, macOS, Linux)
+- `curl` in your PATH (built-in on Windows 10+, macOS, Linux)
 
-## Setup
+## Installation
 
 ### 1. Get your jpdb API token
 
-Go to [jpdb.io/settings](https://jpdb.io/settings) → scroll down to **API** → copy your token.
+Go to [jpdb.io/settings](https://jpdb.io/settings) → scroll to **API** → copy your token.
 
-### 2. Configure the plugin
+### 2. Place the plugin folder
 
-Edit `config.json`:
+Copy the entire `jpdb-mpv-plugin/` folder into your mpv scripts directory:
+
+| OS | Scripts directory |
+|---|---|
+| Windows | `%APPDATA%\mpv\scripts\` or `C:\Program Files\mpv\mpv\scripts\` |
+
+
+The result should be:
+```
+scripts/
+  └── jpdb-mpv-plugin/
+       ├── main.lua
+       ├── jpdb-server.exe   ← build this (step 3)
+       ├── config.json       ← create this (step 4)
+       └── ...
+```
+
+### 3. Build the server
+
+In the `jpdb-mpv-plugin/` folder, run:
+
+```bash
+go build -o jpdb-server.exe .
+```
+
+> On macOS/Linux: `go build -o jpdb-server .`  
+> Cross-compile for Windows from Linux: `GOOS=windows go build -o jpdb-server.exe .`
+
+### 4. Configure
+
+Copy `config.example.json` → `config.json` and fill in your details:
 
 ```json
 {
-  "apiToken": "PASTE_YOUR_TOKEN_HERE",
+  "apiToken": "YOUR_JPDB_API_TOKEN_HERE",
   "miningDeckId": 12345,
   "forqOnMine": true,
   "contextWidth": 1,
-  "serverPort": 9726
+  "serverPort": 9726,
+  "cookiePath": "./jpdb-cookie.txt"
 }
 ```
 
-To find your `miningDeckId`: go to a deck on jpdb.io and look at the URL — the number after `/deck/` is the ID.
+**`miningDeckId`** — go to your deck on jpdb.io; the number in the URL (`/deck/12345`) is the ID. Set to `null` to disable mining.
 
-### 3. Install the Lua script
+**`cookiePath`** — path to your jpdb.io session cookie file (for review/mining actions that use the web scraper). See [Review Setup](#review-setup) below.
 
-Copy `jpdb.lua` to your mpv scripts directory:
+### 5. Done — just open mpv
 
-| OS | Path |
-|---|---|
-| Windows | `%APPDATA%\mpv\scripts\jpdb.lua` |
-| macOS/Linux | `~/.config/mpv/scripts/jpdb.lua` |
-
-### 4. Start the server
-
-In the plugin directory, run:
-
-```bash
-node server.js
-```
-
-Keep this terminal open while watching with mpv. For auto-start, see the tips below.
-
-### 5. Open a video in mpv
-
-Japanese subtitles will automatically be color-coded!
+The server starts automatically when mpv launches and stops when you close the last mpv window. No terminal to keep open.
 
 ## Usage
 
 ### Mouse
+
 | Action | Result |
 |---|---|
-| **Click** a colored word | Opens popup with full dictionary entry |
-| **Click** review button in popup | Submits review to jpdb |
+| **Hover** a colored word | Opens popup with dictionary entry |
+| **Click** review button | Submits review to jpdb |
 | **Click** Add button | Mines word to your deck |
-| **Click** outside popup | Closes popup |
+| **Left-click** outside popup | Closes popup, resumes playback |
 | **Right-click** | Closes popup |
 
-### Keyboard (works on hovered or popup word)
+### Keyboard
+
 | Key | Action |
 |---|---|
-| `Shift` | Toggle popup for hovered word |
 | `1` | Review: Nothing |
 | `2` | Review: Something |
 | `3` | Review: Hard |
 | `4` | Review: Good |
 | `5` | Review: Easy |
-| `a` | Add hovered word to deck |
+| `a` | Add word to deck |
 | `b` | Toggle Blacklist |
 | `n` | Toggle Never Forget |
 | `ESC` | Close popup |
 
-## Tips
+## Review Setup
 
-### Auto-start server with mpv
+Review and mining actions that use the web scraper (review, forq, blacklist) require a jpdb.io session cookie.
 
-Add to `%APPDATA%\mpv\scripts\jpdb-autostart.lua`:
-
-```lua
-local utils = require('mp.utils')
-mp.register_event('file-loaded', function()
-    mp.command_native_async({
-        name = 'subprocess',
-        args = {'cmd', '/c', 'start', '/min', 'node', 'D:\\scripts\\jpdb-mpv-plugin\\server.js'},
-        playback_only = false,
-    }, function() end)
-end)
-```
-
-### Review requires jpdb.io login
-
-Review actions scrape jpdb.io (the API has no direct review endpoint). Make sure you are logged into jpdb.io in your default browser session. The server uses the session cookie from your browser automatically.
-
-### Mining deck not configured
-
-If `miningDeckId` is `null`, the **Add** button will fail. Set it to your deck's numeric ID.
+1. Log into [jpdb.io](https://jpdb.io) in your browser
+2. Export your cookies for `jpdb.io` to `jpdb-cookie.txt` in the plugin folder (Netscape format — use a browser extension like [Cookie-Editor](https://cookie-editor.com/))
+3. The server will keep the cookie up-to-date automatically
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---|---|
-| Subtitles not colored | Make sure `server.js` is running; check terminal for errors |
-| "API token not configured" | Edit `config.json` and set `apiToken` |
-| "Not logged in to jpdb.io" | Log into jpdb.io in your browser (for review) |
-| Popup doesn't appear | Try clicking directly on a colored word |
-| Colors wrong/missing | Check `node server.js` console for parse errors |
+| No colored subtitles | Check `debug-server.log` in the plugin folder for errors |
+| "API token not configured" | Set `apiToken` in `config.json` |
+| "Not logged in to jpdb.io" | Export your jpdb.io cookies to `jpdb-cookie.txt` |
+| Server doesn't start | Make sure `jpdb-server.exe` was built and is in the plugin folder |
+| Wrong port | Change `serverPort` in `config.json` and `SERVER_URL` in `main.lua` to match |
+
+## Project Structure
+
+```
+jpdb-mpv-plugin/
+  ├── main.lua              # MPV Lua plugin (entry point)
+  ├── server.go             # Go HTTP server source
+  ├── go.mod                # Go module file
+  ├── config.example.json   # Config template (copy → config.json)
+  └── README.md
+```
+
+Files created at runtime (gitignored):
+```
+  ├── jpdb-server.exe       # Built from server.go
+  ├── config.json           # Your private config (never commit!)
+  ├── jpdb-cookie.txt       # Your session cookie
+  ├── jpdb-debug.log        # Lua plugin log
+  └── debug-server.log      # Go server log
+```

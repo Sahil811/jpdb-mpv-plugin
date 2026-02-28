@@ -65,6 +65,7 @@ type Config struct {
 	ServerPort   int    `json:"serverPort"`
 	ForqOnMine   bool   `json:"forqOnMine"`
 	CookiePath   string `json:"cookiePath"`
+	Debug        bool   `json:"debug"`
 }
 
 var currentConfig atomic.Pointer[Config]
@@ -260,27 +261,44 @@ func saveCookie(setCookieHeader string) {
 }
 
 // ─── Async buffered logger ────────────────────────────────────────────────────
-// Log calls never block request handlers — writes go to a buffered channel
-// and a single background goroutine flushes them to disk every 500ms.
+// When debug=false the logger is a silent no-op (no file, no stdout output).
+// When debug=true it writes timestamped lines to a log file and stdout.
+// The enabled flag can be toggled at runtime via setDebug() on hot-reload.
 
 type AsyncLogger struct {
-	ch  chan string
-	f   *os.File
-	buf *bufio.Writer
+	ch      chan string
+	f       *os.File
+	buf     *bufio.Writer
+	enabled atomic.Bool
 }
 
-func newAsyncLogger(path string) *AsyncLogger {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		log.Fatalf("Cannot open log file: %v", err)
-	}
+func newAsyncLogger(path string, enabled bool) *AsyncLogger {
 	al := &AsyncLogger{
-		ch:  make(chan string, 4096),
-		f:   f,
-		buf: bufio.NewWriterSize(f, 64*1024),
+		ch: make(chan string, 4096),
+	}
+	al.enabled.Store(enabled)
+	if enabled {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			log.Fatalf("Cannot open log file: %v", err)
+		}
+		al.f = f
+		al.buf = bufio.NewWriterSize(f, 64*1024)
 	}
 	go al.drain()
 	return al
+}
+
+func (al *AsyncLogger) setDebug(enabled bool, path string) {
+	was := al.enabled.Swap(enabled)
+	if enabled && !was && al.f == nil {
+		// Turning on: open the log file for the first time
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			al.f = f
+			al.buf = bufio.NewWriterSize(f, 64*1024)
+		}
+	}
 }
 
 func (al *AsyncLogger) drain() {
@@ -288,14 +306,21 @@ func (al *AsyncLogger) drain() {
 	for {
 		select {
 		case line := <-al.ch:
-			al.buf.WriteString(line)
+			if al.buf != nil {
+				al.buf.WriteString(line)
+			}
 		case <-ticker.C:
-			al.buf.Flush()
+			if al.buf != nil {
+				al.buf.Flush()
+			}
 		}
 	}
 }
 
 func (al *AsyncLogger) Log(format string, args ...any) {
+	if !al.enabled.Load() {
+		return
+	}
 	line := fmt.Sprintf("[%s] %s\n",
 		time.Now().Format("15:04:05.000"),
 		fmt.Sprintf(format, args...))
@@ -1007,7 +1032,8 @@ func watchConfig(path string) {
 			if cfg, err := loadConfig(path); err == nil {
 				currentConfig.Store(cfg)
 				parseCache.Clear()
-				logger.Log("Config hot-reloaded.")
+				logger.setDebug(cfg.Debug, filepath.Join(filepath.Dir(path), "debug-server.log"))
+				logger.Log("Config hot-reloaded (debug=%v)", cfg.Debug)
 			} else {
 				logger.Log("Config reload failed: %v", err)
 			}
@@ -1055,14 +1081,15 @@ func main() {
 	configPath := filepath.Join(execDir, "config.json")
 	logPath := filepath.Join(execDir, "debug-server.log")
 
-	logger = newAsyncLogger(logPath)
-	logger.Log("=== jpdb-server (Go) starting ===")
-
+	// Load config first so we know whether debug logging is enabled
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		log.Fatalf("Config error: %v", err)
 	}
 	currentConfig.Store(cfg)
+
+	logger = newAsyncLogger(logPath, cfg.Debug)
+	logger.Log("=== jpdb-server (Go) starting ===")
 
 	if cfg.APIToken == "" || cfg.APIToken == "YOUR_JPDB_API_TOKEN_HERE" {
 		logger.Log("WARNING: apiToken not set in config.json — API calls will fail!")

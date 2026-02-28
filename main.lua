@@ -46,13 +46,19 @@ local utils   = require('mp.utils')
 -- main.lua lives inside scripts/jpdb-mpv-plugin/ so the script dir IS the plugin dir.
 local PLUGIN_DIR = mp.get_script_directory()
 local LOG_PATH   = PLUGIN_DIR .. '/jpdb-debug.log'
-local log_file = io.open(LOG_PATH, 'w')
+
+-- Set to true to write a debug log file (jpdb-debug.log) and verbose messages.
+-- Leave false in production — no file is created, dlog() is a no-op.
+local DEBUG_LOG = false
+
+local log_file = DEBUG_LOG and io.open(LOG_PATH, 'w') or nil
 if log_file then
     log_file:write('=== jpdb.lua v3 started ' .. os.date('%Y-%m-%dT%H:%M:%S') .. ' ===\n')
     log_file:flush()
 end
 
 local function dlog(...)
+    if not DEBUG_LOG then return end
     local parts = {}
     for _, v in ipairs({...}) do parts[#parts+1] = tostring(v) end
     local line = table.concat(parts, ' ')
