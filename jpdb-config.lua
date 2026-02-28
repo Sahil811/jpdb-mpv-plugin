@@ -4,36 +4,36 @@
 local DS = {
     -- ======== POPUP SETTINGS ========
     -- Master dimensions for the popup
-    width       = 560,    -- Max width of the popup (pixels)
-    lbar_w      = 4,      -- Width of the left state colour bar (reduced from 5)
-    pad_h       = 16,     -- Horizontal padding inside popup (reduced from 22)
-    pad_v       = 12,     -- Vertical padding inside popup (reduced from 18)
-    unit        = 6,      -- Base unit for vertical spacing (reduced from 8)
-    btn_gap     = 4,      -- Gap between action/review buttons (reduced from 5)
+    width       = 540,    -- Slightly narrower for better focus (reduced from 560)
+    lbar_w      = 3,      -- Thinner accent bar (reduced from 4)
+    pad_h       = 14,     -- Tighter horizontal padding (reduced from 16)
+    pad_v       = 10,     -- Tighter vertical padding (reduced from 12)
+    unit        = 5,      -- Smaller spacing unit (reduced from 6)
+    btn_gap     = 3,      -- Minimal button gaps (reduced from 4)
 
     -- Surfaces (dark warm paper)
     bg_popup    = '&H0F0E0A&',   -- deepest background
     bg_surface  = '&H1A1914&',   -- card body
-    bg_header   = '&H221F18&',   -- header zone (slightly lighter)
-    bg_divider  = '&H332E24&',   -- horizontal rule
+    bg_header   = '&H1C1A15&',   -- header zone (slightly darker for less contrast)
+    bg_divider  = '&H2A2620&',   -- horizontal rule (lighter for subtlety)
 
-    -- Shadows (stacked for depth)
+    -- Shadows (stacked for depth) - Reduced for cleaner look
     shadow_ambient = '&H000000&',
     shadow_key     = '&H000000&',
     shadow_fill    = '&H000000&',
 
     -- State badge background tint (very translucent)
-    badge_alpha = '&HD8&',       -- badge bg alpha (low opacity)
+    badge_alpha = '&HE0&',       -- Slightly more transparent (was D8)
 
-    -- Text hierarchy
-    col_primary   = '&HFAF8F2&', -- headings, kanji
-    col_secondary = '&HBCB8AE&', -- readings, labels
+    -- Text hierarchy - Enhanced contrast
+    col_primary   = '&HFFFFFF&', -- Pure white for kanji (was FAF8F2)
+    col_secondary = '&HC8C4BC&', -- Brighter readings (was BCB8AE)
     col_tertiary  = '&H8A8680&', -- muted / meta
-    col_gloss_odd  = '&HF0EDE6&',
-    col_gloss_even = '&HD4D0CA&',
-    col_pos       = '&H9BAAC0&', -- part-of-speech chips
-    col_freq      = '&H7A92A8&', -- frequency rank
-    col_shortcut  = '&H70706A&', -- keyboard shortcut hints
+    col_gloss_odd  = '&HF5F2EA&', -- Brighter glosses (was F0EDE6)
+    col_gloss_even = '&HE0DCD6&', -- Better contrast (was D4D0CA)
+    col_pos       = '&HA8B8CC&', -- Brighter POS tags (was 9BAAC0)
+    col_freq      = '&H88A0B8&', -- Brighter frequency (was 7A92A8)
+    col_shortcut  = '&H888882&', -- Slightly brighter shortcuts (was 70706A)
     col_divider   = '&H504A40&',
     col_toast_ok  = '&H60C880&', -- inline success
     col_toast_err = '&H5050EE&', -- inline error
@@ -49,32 +49,31 @@ local DS = {
     btn_easy      = { bg='&H603E10&', hov='&H805822&', act='&H9C7030&' },
     btn_neutral   = { bg='&H282218&', hov='&H3C3428&', act='&H504438&' },
 
-    -- Typography sizes (pt, rendered by ASS font size)
-    -- Increased button text for better readability
-    fs_kanji    = 52,     -- Main spelling (Kanji)
-    fs_reading  = 28,     -- Reading (Kana) underneath spelling (increased from 24)
-    fs_pos      = 14,     -- Part of speech label (e.g. ▸ Noun)
-    fs_gloss    = 24,     -- Meaning/English definitions (increased from 22)
-    fs_meta     = 15,     -- Meta information
-    fs_badge    = 13,     -- State badge text (e.g. Known, New)
-    fs_btn_act  = 16,     -- Action button text (increased from 15)
-    fs_btn_rev  = 17,     -- Review button text (increased from 16)
-    fs_shortcut = 11,     -- Keyboard shortcut hint text (reduced from 12)
-    fs_toast    = 15,     -- Inline action feedback text
+    -- Typography sizes - Optimized hierarchy
+    fs_kanji    = 54,     -- Slightly larger kanji for prominence (was 52)
+    fs_reading  = 26,     -- Balanced reading size (was 28)
+    fs_pos      = 13,     -- Smaller POS for less visual weight (was 14)
+    fs_gloss    = 23,     -- Optimal gloss size (was 24)
+    fs_meta     = 14,     -- Smaller meta (was 15)
+    fs_badge    = 12,     -- Smaller badges (was 13)
+    fs_btn_act  = 15,     -- Balanced button text (was 16)
+    fs_btn_rev  = 16,     -- Balanced review buttons (was 17)
+    fs_shortcut = 10,     -- Minimal shortcuts (was 11)
+    fs_toast    = 14,     -- Smaller toast (was 15)
 
-    -- Line heights (px) - Optimized for compact layout
-    lh_kanji    = 58,     -- Reduced from 62
-    lh_reading  = 32,     -- Increased from 28 to accommodate larger reading text
-    lh_pos      = 18,     -- Reduced from 20
-    lh_gloss    = 28,     -- Increased from 26 to accommodate larger gloss text
-    lh_meta     = 18,     -- Reduced from 20
-    lh_badge    = 20,     -- Reduced from 22
-    lh_toast    = 24,     -- Reduced from 26
+    -- Line heights - Optimized for readability and compactness
+    lh_kanji    = 60,     -- Breathing room for kanji (was 58)
+    lh_reading  = 30,     -- Tighter reading (was 32)
+    lh_pos      = 17,     -- Compact POS (was 18)
+    lh_gloss    = 27,     -- Optimal gloss spacing (was 28)
+    lh_meta     = 17,     -- Compact meta (was 18)
+    lh_badge    = 18,     -- Tighter badges (was 20)
+    lh_toast    = 22,     -- Compact toast (was 24)
     divider_h   = 1,      -- Horizontal divider line thickness
 
-    -- Button heights - More compact
-    bh_action   = 30,     -- Reduced from 34
-    bh_review   = 36,     -- Reduced from 42
+    -- Button heights - Compact but clickable
+    bh_action   = 28,     -- More compact action buttons (was 30)
+    bh_review   = 34,     -- More compact review buttons (was 36)
 }
 
 -- ======== SUBTITLE OVERLAY SETTINGS ========
