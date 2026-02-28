@@ -1,5 +1,5 @@
 {
-  "apiToken": "033cfde37d2c9c87b4df332a1301aeb6",
+  "apiToken": "YOUR_JPDB_API_TOKEN_HERE",
   "miningDeckId": null,
   "forqOnMine": true,
   "contextWidth": 1,

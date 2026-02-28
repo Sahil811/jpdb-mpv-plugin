@@ -1,3 +1,9 @@
 debug-server.log
 jpdb-debug.log
 jpdb-cookie.txt
+
+# Contains real API token — never commit this
+config.json
+
+# Pre-built binary — users build from source or download a release
+jpdb-server.exe
