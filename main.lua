@@ -248,9 +248,10 @@ end
 --   Full-width (48 px): CJK ideographs, Hiragana, Katakana, fullwidth Latin/punct
 --   Half-width (26 px): ASCII, Latin extensions, Greek, halfwidth Katakana
 
-local PX_FULL = 48
-local PX_HALF = 26
-local LINE_H  = 58
+local SUB_CONF = conf.SUBTITLE_OVERLAY
+local PX_FULL = SUB_CONF.px_full
+local PX_HALF = SUB_CONF.px_half
+local LINE_H  = SUB_CONF.line_h
 
 -- Returns (pixel_width, next_byte_index) for the UTF-8 character at byte i.
 -- Refined classification vs v2:
@@ -468,7 +469,7 @@ local function build_subtitle_ass(tokens, raw_text)
 end
 
 local function subtitle_layout()
-    local sub_y = osd_h - 90
+    local sub_y = osd_h - SUB_CONF.pos_y_offset
     local lines = split_lines(current_text)
     local n     = #lines
     return {
@@ -509,8 +510,8 @@ local function render_subtitles()
     for li, ln in ipairs(layout.lines) do
         local from_bottom = layout.n - li
         local line_bottom = layout.sub_y - from_bottom * LINE_H
-        -- Vertical hit region: cap height of \\fs48 glyph with 2px border
-        local y1 = line_bottom - 46 - 4
+        -- Vertical hit region: cap height of glyph with 2px border
+        local y1 = line_bottom - math.floor(SUB_CONF.font_size * 0.96) - 4
         local y2 = line_bottom + 8
 
         local px_map, total_px = build_px_map(ln.text)
@@ -547,7 +548,7 @@ local function render_subtitles()
 
     local a = assdraw.ass_new()
     a:new_event()
-    a:append('{\\an2\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')\\fs48\\bord2\\shad1\\b0}')
+    a:append('{\\an2\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')\\fs' .. SUB_CONF.font_size .. '\\bord2\\shad1\\b0}')
     a:append(ass_content)
 
     if sub_osd.data ~= a.text then

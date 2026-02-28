@@ -2,13 +2,14 @@
 -- User Configurations for JPDB MPV Plugin
 
 local DS = {
-    -- Layout
-    width       = 560,
-    lbar_w      = 5,
-    pad_h       = 22,
-    pad_v       = 18,
-    unit        = 8,
-    btn_gap     = 5,
+    -- ======== POPUP SETTINGS ========
+    -- Master dimensions for the popup
+    width       = 560,    -- Max width of the popup (pixels)
+    lbar_w      = 5,      -- Width of the left state colour bar
+    pad_h       = 22,     -- Horizontal padding inside popup
+    pad_v       = 18,     -- Vertical padding inside popup
+    unit        = 8,      -- Base unit for vertical spacing
+    btn_gap     = 5,      -- Gap between action/review buttons
 
     -- Surfaces (dark warm paper)
     bg_popup    = '&H0F0E0A&',   -- deepest background
@@ -48,19 +49,20 @@ local DS = {
     btn_easy      = { bg='&H603E10&', hov='&H805822&', act='&H9C7030&' },
     btn_neutral   = { bg='&H282218&', hov='&H3C3428&', act='&H504438&' },
 
-    -- Typography sizes (pt, rendered by ASS)
-    fs_kanji    = 52,
-    fs_reading  = 24,
-    fs_pos      = 14,
-    fs_gloss    = 22,
-    fs_meta     = 15,
-    fs_badge    = 13,
-    fs_btn_act  = 15,
-    fs_btn_rev  = 16,
-    fs_shortcut = 12,
-    fs_toast    = 15,
+    -- Typography sizes (pt, rendered by ASS font size)
+    -- Increase these values to make the text larger inside the popup
+    fs_kanji    = 52,     -- Main spelling (Kanji)
+    fs_reading  = 24,     -- Reading (Kana) underneath spelling
+    fs_pos      = 14,     -- Part of speech label (e.g. ▸ Noun)
+    fs_gloss    = 22,     -- Meaning/English definitions
+    fs_meta     = 15,     -- Meta information
+    fs_badge    = 13,     -- State badge text (e.g. Known, New)
+    fs_btn_act  = 15,     -- Action button text (Add, Blacklist)
+    fs_btn_rev  = 16,     -- Review button text (Good, Easy, etc.)
+    fs_shortcut = 12,     -- Keyboard shortcut hint text
+    fs_toast    = 15,     -- Inline action feedback text
 
-    -- Line heights (px)
+    -- Line heights (px) - Should be adjusted proportionally if you increase font sizes!
     lh_kanji    = 62,
     lh_reading  = 30,
     lh_pos      = 20,
@@ -68,12 +70,30 @@ local DS = {
     lh_meta     = 20,
     lh_badge    = 22,
     lh_toast    = 26,
-    divider_h   = 1,
+    divider_h   = 1,      -- Horizontal divider line thickness
 
     -- Button heights
     bh_action   = 34,
     bh_review   = 42,
 }
+
+-- ======== SUBTITLE OVERLAY SETTINGS ========
+local SUBTITLE_OVERLAY = {
+    -- Distance from the bottom of the screen (in pixels)
+    -- Increase this if your subtitles overlap with the system UI or standard bottom subtitles
+    pos_y_offset = 90,
+
+    -- Subtitle font size rendering
+    font_size    = 48,  
+
+    -- Glyph width tracking for hit detection. If you change font_size,
+    -- ideally you should change these proportionally.
+    -- e.g. if font_size goes from 48 -> 60 (+25%), PX_FULL from 48 -> 60, PX_HALF from 26 -> ~32
+    px_full      = 48,
+    px_half      = 26,
+    line_h       = 58,
+}
+
 
 return {
     -- Set to true to write a debug log file (jpdb-debug.log) and verbose messages.
@@ -81,10 +101,14 @@ return {
     DEBUG_LOG = false,
 
     SERVER_URL  = 'http://127.0.0.1:9726',
+    
+    -- Change the font family used for both subtitles and popup UI
     FONT_FAMILY = 'Yu Gothic UI',
 
     DS = DS,
+    SUBTITLE_OVERLAY = SUBTITLE_OVERLAY,
 
+    -- ======== CARD STATES & COLOURS ========
     STATE_COLORS = {
         ['known']        = '&H50C878&',
         ['never-forget'] = '&H50C878&',
