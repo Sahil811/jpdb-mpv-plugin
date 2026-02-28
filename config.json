@@ -3,5 +3,6 @@
   "miningDeckId": null,
   "forqOnMine": true,
   "contextWidth": 1,
-  "serverPort": 9726
+  "serverPort": 9726,
+  "cookiePath": "./jpdb-cookie.txt"
 }

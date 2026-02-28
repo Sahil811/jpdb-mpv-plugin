@@ -596,9 +596,15 @@ func handleSetFlag(w http.ResponseWriter, r *http.Request) {
 		if *body.State {
 			ep = "/deck/add-vocabulary"
 		}
+		vidInt, vidOk := anyToInt64(body.VID)
+		sidInt, sidOk := anyToInt64(body.SID)
+		if !vidOk || !sidOk {
+			sendError(w, 400, "vid and sid must be integers")
+			return
+		}
 		_, err = jpdbAPI(r.Context(), ep, map[string]any{
 			"id":         deckID,
-			"vocabulary": [][]any{{vid, sid}},
+			"vocabulary": [][]int64{{vidInt, sidInt}},
 		})
 	}
 
@@ -637,16 +643,23 @@ func handleMine(w http.ResponseWriter, r *http.Request) {
 
 	logger.Log("MINE vid=%s sid=%s", vid, sid)
 
+	vidInt, vidOk := anyToInt64(body.VID)
+	sidInt, sidOk := anyToInt64(body.SID)
+	if !vidOk || !sidOk {
+		sendError(w, 400, "vid and sid must be integers")
+		return
+	}
+
 	if _, err := jpdbAPI(r.Context(), "/deck/add-vocabulary", map[string]any{
 		"id":         cfg.MiningDeckID,
-		"vocabulary": [][]any{{vid, sid}},
+		"vocabulary": [][]int64{{vidInt, sidInt}},
 	}); err != nil {
 		sendError(w, 500, err.Error())
 		return
 	}
 
 	if body.Sentence != "" {
-		sb := map[string]any{"vid": vid, "sid": sid, "sentence": body.Sentence}
+		sb := map[string]any{"vid": vidInt, "sid": sidInt, "sentence": body.Sentence}
 		if body.Translation != "" {
 			sb["translation"] = body.Translation
 		}
@@ -741,6 +754,22 @@ func anyToStr(v any) string {
 		return strconv.Itoa(val)
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+func anyToInt64(v any) (int64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return int64(val), true
+	case int:
+		return int64(val), true
+	case int64:
+		return val, true
+	case string:
+		if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
 }
 
 func truncate(s string, n int) string {
