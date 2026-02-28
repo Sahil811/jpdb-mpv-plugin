@@ -484,6 +484,8 @@ local function render_subtitles()
     if not sub_osd then return end
     subtitle_regions = {}
 
+    dlog('[render_subtitles] tokens=' .. #current_tokens .. ' hovered=' .. tostring(hovered_token ~= nil))
+
     if #current_tokens == 0 then
         if sub_osd.data ~= '' then sub_osd.data = ''; sub_osd:update() end
         return
@@ -569,20 +571,25 @@ local BTN_SHORTCUTS = conf.BTN_SHORTCUTS
 local WRAP_CHARS = 44
 local MAX_MEANINGS = 6
 
+-- Forward declaration
+local render_popup
+
 -- Show inline toast inside the popup
 local function show_popup_toast(msg_text, ok)
+    dlog('[show_popup_toast] msg=' .. msg_text .. ' ok=' .. tostring(ok))
     popup_toast_text = msg_text
     popup_toast_ok   = (ok ~= false)
     if popup_toast_timer then popup_toast_timer:kill() end
     popup_toast_timer = mp.add_timeout(1.4, function()
         popup_toast_timer = nil
         popup_toast_text  = nil
+        dlog('[show_popup_toast] Toast timer expired')
         if popup_visible then render_popup() end
     end)
     render_popup()
 end
 
-local function render_popup()
+render_popup = function()
     if not popup_osd then return end
     if not popup_visible or not popup_token then
         popup_rect = nil
@@ -845,21 +852,30 @@ end
 -- ─── Actions ──────────────────────────────────────────────────────────────────
 
 local function refresh_after_action()
+    dlog('[refresh_after_action] Starting refresh...')
     http_request_async('POST', '/parse', { text = current_text }, function(res, err)
-        if err or not (res and res.tokens) then return end
+        if err or not (res and res.tokens) then 
+            dlog('[refresh_after_action] Error or no tokens')
+            return 
+        end
+        dlog('[refresh_after_action] Got ' .. #res.tokens .. ' tokens')
         current_tokens      = res.tokens
         cached_sub_ass      = nil
         cached_sub_token_id = nil
-        render_subtitles()
         if popup_visible and popup_token then
+            dlog('[refresh_after_action] Popup visible, updating tokens')
             for _, tok in ipairs(current_tokens) do
                 if tok.card.vid == popup_token.card.vid and
                    tok.card.sid == popup_token.card.sid then
-                    popup_token = tok; break
+                    popup_token = tok
+                    hovered_token = tok  -- Keep hovered_token in sync!
+                    dlog('[refresh_after_action] Updated popup_token and hovered_token')
+                    break
                 end
             end
             render_popup()
         end
+        render_subtitles()
     end)
 end
 
@@ -915,9 +931,11 @@ end
 local parse_timer = nil
 
 local function on_subtitle_change(_, new_text)
+    dlog('[on_subtitle_change] new_text=' .. tostring(new_text) .. ' last=' .. tostring(last_parsed_text))
     if new_text == last_parsed_text then return end
     last_parsed_text = new_text
 
+    dlog('[on_subtitle_change] Subtitle changed, clearing state')
     if hover_debounce_timer then hover_debounce_timer:kill(); hover_debounce_timer = nil end
     hover_pending_token = nil
     hovered_token  = nil
@@ -1015,6 +1033,13 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                     hover_debounce_timer:kill(); hover_debounce_timer = nil
                 end
                 hover_pending_token = nil
+                -- Keep hovered_token set to popup_token so subtitle stays visible
+                if popup_token and hovered_token ~= popup_token then
+                    hovered_token = popup_token
+                    cached_sub_ass = nil
+                    cached_sub_token_id = nil
+                    render_subtitles()
+                end
                 local hit = find_hovered_button(mx, my)
                 local nk  = hit and hit.key or nil
                 if nk ~= hovered_button then
@@ -1088,11 +1113,36 @@ local clicks_bound = false
 
 local function handle_left_click(event)
     if event and event.event ~= 'down' then return end
+    dlog('[handle_left_click] popup_visible=' .. tostring(popup_visible))
     if popup_visible then
         -- FIX: dispatch BEFORE close so button action fires correctly
         local b = find_hovered_button(hover_x, hover_y)
+        dlog('[handle_left_click] button found=' .. tostring(b ~= nil))
         if b then
-            dispatch_button(b)
+            dlog('[handle_left_click] Button clicked: ' .. b.key)
+            dlog('[handle_left_click] popup_token=' .. tostring(popup_token))
+            dlog('[handle_left_click] About to dispatch button')
+            
+            local ok, err = pcall(function()
+                dispatch_button(b)
+            end)
+            if not ok then
+                dlog('[handle_left_click] ERROR in dispatch_button: ' .. tostring(err))
+            end
+            
+            dlog('[handle_left_click] After dispatch_button')
+            -- Keep hovered_token set so subtitle stays visible during toast
+            if popup_token then
+                dlog('[handle_left_click] Setting hovered_token to popup_token')
+                hovered_token = popup_token
+                cached_sub_ass = nil
+                cached_sub_token_id = nil
+                dlog('[handle_left_click] About to render_subtitles')
+                render_subtitles()
+                dlog('[handle_left_click] After render_subtitles')
+            else
+                dlog('[handle_left_click] ERROR: popup_token is nil!')
+            end
             -- Don't close immediately — let the inline toast show for 1.4s
         else
             close_popup()
