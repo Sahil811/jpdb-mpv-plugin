@@ -8,10 +8,10 @@ Replicates [jpdb-breader](https://github.com/hmry/jpdb-breader) Chrome extension
 
 - 🎨 **Color-coded subtitles** — words colored by jpdb state (known / new / due / failed / etc.)
 - 💬 **Hover popup** — hover any word to see its dictionary entry, reading, and part of speech
-- ✅ **Review buttons** — Nothing / Something / Hard / Good / Easy (clickable in popup)
-- ⛏️ **Mine buttons** — Add to deck, Blacklist, Never Forget (clickable in popup)
-- ⌨️ **Keyboard shortcuts** — 1–5 for review grades, A / B / N for actions
+- ⭐ **Never Forget button** — mark important words to never forget (clickable in popup)
+- ⌨️ **Keyboard shortcuts** — N for Never Forget, ESC to close
 - 🚀 **Auto server lifecycle** — server starts when the first mpv opens, stops when the last mpv closes. Multiple mpv windows share one server automatically.
+- 🎯 **Optimized UI** — compact, clean design with maximum readability and efficient space usage
 
 ## Color Coding
 
@@ -74,17 +74,22 @@ Copy `config.example.json` → `config.json` and fill in your details:
 ```json
 {
   "apiToken": "YOUR_JPDB_API_TOKEN_HERE",
-  "miningDeckId": 12345,
+  "miningDeckId": null,
   "forqOnMine": true,
   "contextWidth": 1,
   "serverPort": 9726,
-  "cookiePath": "./jpdb-cookie.txt"
+  "cookiePath": "./jpdb-cookie.txt",
+  "debug": false
 }
 ```
 
-**`miningDeckId`** — go to your deck on jpdb.io; the number in the URL (`/deck/12345`) is the ID. Set to `null` to disable mining.
+**`apiToken`** — your jpdb.io API token (required for parsing subtitles)
 
-**`cookiePath`** — path to your jpdb.io session cookie file (for review/mining actions that use the web scraper). See [Review Setup](#review-setup) below.
+**`miningDeckId`** — optional, set to `null` (mining features are disabled in this version)
+
+**`cookiePath`** — path to your jpdb.io session cookie file (for Never Forget actions). See [Cookie Setup](#cookie-setup) below.
+
+**`debug`** — set to `true` to enable verbose logging in `debug-server.log`
 
 ### 5. Done — just open mpv
 
@@ -97,8 +102,7 @@ The server starts automatically when mpv launches and stops when you close the l
 | Action | Result |
 |---|---|
 | **Hover** a colored word | Opens popup with dictionary entry |
-| **Click** review button | Submits review to jpdb |
-| **Click** Add button | Mines word to your deck |
+| **Click** Never Forget button | Toggles Never Forget status for the word |
 | **Left-click** outside popup | Closes popup, resumes playback |
 | **Right-click** | Closes popup |
 
@@ -106,23 +110,28 @@ The server starts automatically when mpv launches and stops when you close the l
 
 | Key | Action |
 |---|---|
-| `1` | Review: Nothing |
-| `2` | Review: Something |
-| `3` | Review: Hard |
-| `4` | Review: Good |
-| `5` | Review: Easy |
-| `a` | Add word to deck |
-| `b` | Toggle Blacklist |
 | `n` | Toggle Never Forget |
 | `ESC` | Close popup |
+| `Shift` | Show/hide popup for hovered word |
 
-## Review Setup
+## Cookie Setup
 
-Review and mining actions that use the web scraper (review, forq, blacklist) require a jpdb.io session cookie.
+The Never Forget feature requires a jpdb.io session cookie to work.
 
 1. Log into [jpdb.io](https://jpdb.io) in your browser
 2. Export your cookies for `jpdb.io` to `jpdb-cookie.txt` in the plugin folder (Netscape format — use a browser extension like [Cookie-Editor](https://cookie-editor.com/))
 3. The server will keep the cookie up-to-date automatically
+
+## Configuration
+
+You can customize the popup appearance by editing `jpdb-config.lua`:
+
+- Font sizes for kanji, readings, and meanings
+- Colors for different card states
+- Popup dimensions and spacing
+- Button sizes and gaps
+
+The default configuration is optimized for readability and compact space usage.
 
 ## Troubleshooting
 
@@ -139,6 +148,7 @@ Review and mining actions that use the web scraper (review, forq, blacklist) req
 ```
 jpdb-mpv-plugin/
   ├── main.lua              # MPV Lua plugin (entry point)
+  ├── jpdb-config.lua       # UI configuration (colors, sizes, spacing)
   ├── server.go             # Go HTTP server source
   ├── go.mod                # Go module file
   ├── config.example.json   # Config template (copy → config.json)
@@ -150,6 +160,6 @@ Files created at runtime (gitignored):
   ├── jpdb-server.exe       # Built from server.go
   ├── config.json           # Your private config (never commit!)
   ├── jpdb-cookie.txt       # Your session cookie
-  ├── jpdb-debug.log        # Lua plugin log
-  └── debug-server.log      # Go server log
+  ├── jpdb-debug.log        # Lua plugin log (when DEBUG_LOG=true)
+  └── debug-server.log      # Go server log (when debug=true)
 ```

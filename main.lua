@@ -626,7 +626,8 @@ render_popup = function()
         if total > MAX_MEANINGS then h = h + DS.lh_gloss end -- "…N more" line
         if popup_toast_text then h = h + DS.unit + DS.lh_toast end
         h = h + DS.unit * 2 + DS.divider_h + DS.unit
-        h = h + DS.bh_action + DS.btn_gap + DS.bh_review + DS.pad_v
+        -- Only one button row now (Never Forget only)
+        h = h + DS.bh_action + DS.pad_v
         return h
     end
 
@@ -773,24 +774,30 @@ render_popup = function()
             { x1=bx2, y1=by, x2=bx2+bw, y2=by+bh, key=key, action=action, args=args }
     end
 
-    -- ── Action row (Add / Blacklist / Never-Forget) ───────────────────────────
-    local blacklisted, never_forgot = false, false
+    -- ── Action row - Only Never Forget button ────────────────────────────────
+    local never_forgot = false
     for _, s in ipairs(card.state) do
-        if s == 'blacklisted'  then blacklisted  = true end
         if s == 'never-forget' then never_forgot = true end
     end
 
+    -- Single centered button
+    local btn_width = math.floor((W - LB - PAD*2) * 0.6)  -- 60% of available width
+    local btn_x = px + cx0 + math.floor(((W - LB - PAD*2) - btn_width) / 2)  -- Center it
+    btn(never_forgot and '★ Remove Never Forget' or '★ Never Forget',
+        'never-forget', 'set-flag', { flag='never-forget', state=not never_forgot }, 
+        btn_x, cy, btn_width, DS.bh_action)
+    cy = cy + DS.bh_action + DS.btn_gap
+
+    --[[ DISABLED: Add and Blacklist buttons
     local aw   = math.floor((W - LB - PAD*2 - DS.btn_gap*2) / 3)
     local abx  = px + cx0
     btn('＋ Add',  'add', 'mine', {}, abx, cy, aw, DS.bh_action)
     abx = abx + aw + DS.btn_gap
     btn(blacklisted  and '✕ Un-Blacklist' or '⊘ Blacklist',
         'blacklist', 'set-flag', { flag='blacklist',    state=not blacklisted  }, abx, cy, aw, DS.bh_action)
-    abx = abx + aw + DS.btn_gap
-    btn(never_forgot and '★ Un-NF' or '★ Never Forget',
-        'never-forget', 'set-flag', { flag='never-forget', state=not never_forgot }, abx, cy, aw, DS.bh_action)
-    cy = cy + DS.bh_action + DS.btn_gap
+    --]]
 
+    --[[ DISABLED: Review buttons
     -- ── Review row ────────────────────────────────────────────────────────────
     local rev_btns = {
         { '✕ Nothing',   'nothing',   'nothing'   },
@@ -805,6 +812,7 @@ render_popup = function()
         btn(b[1], b[2], 'review', { rating=b[3] }, rbx, cy, rw, DS.bh_review, DS.fs_btn_rev)
         rbx = rbx + rw + DS.btn_gap
     end
+    --]]
 
     -- ── Compose & diff ────────────────────────────────────────────────────────
     local all = {}
