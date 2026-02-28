@@ -84,14 +84,14 @@ local SUBTITLE_OVERLAY = {
     pos_y_offset = 90,
 
     -- Subtitle font size rendering
-    font_size    = 48,  
+    font_size    = 60,  
 
     -- Glyph width tracking for hit detection. If you change font_size,
     -- ideally you should change these proportionally.
     -- e.g. if font_size goes from 48 -> 60 (+25%), PX_FULL from 48 -> 60, PX_HALF from 26 -> ~32
-    px_full      = 48,
-    px_half      = 26,
-    line_h       = 58,
+    px_full      = 60,
+    px_half      = 32,
+    line_h       = 72,
 }
 
 
