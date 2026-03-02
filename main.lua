@@ -71,6 +71,32 @@ local function dlog(...)
     msg.info(line)
 end
 
+-- ─── Load kanji meanings ──────────────────────────────────────────────────────
+local kanji_meanings_map = {}
+local function load_kanji_meanings()
+    local kanji_file = io.open(PLUGIN_DIR .. '/kanji_meanings.json', 'r')
+    if not kanji_file then
+        dlog('[kanji] kanji_meanings.json not found')
+        return
+    end
+    local content = kanji_file:read('*all')
+    kanji_file:close()
+    
+    local ok, data = pcall(utils.parse_json, content)
+    if not ok or not data then
+        dlog('[kanji] Failed to parse kanji_meanings.json')
+        return
+    end
+    
+    for _, entry in ipairs(data) do
+        if entry.kanji and entry.meaning then
+            kanji_meanings_map[entry.kanji] = entry.meaning
+        end
+    end
+    dlog('[kanji] Loaded ' .. tostring(#data) .. ' kanji meanings')
+end
+load_kanji_meanings()
+
 local SERVER_URL  = conf.SERVER_URL
 local FONT_FAMILY = conf.FONT_FAMILY
 
@@ -416,6 +442,37 @@ local function wrap_text(s, max_ch)
     return lines
 end
 
+-- Extract individual kanji characters from a string
+local function extract_kanji(text)
+    local kanji_list = {}
+    local i = 1
+    local len = #text
+    while i <= len do
+        local b = text:byte(i)
+        local char_len
+        if b < 0x80 then
+            char_len = 1
+        elseif b < 0xE0 then
+            char_len = 2
+        elseif b < 0xF0 then
+            char_len = 3
+        else
+            char_len = 4
+        end
+        
+        local char = text:sub(i, i + char_len - 1)
+        -- Check if this character has a meaning (is a kanji)
+        if kanji_meanings_map[char] then
+            kanji_list[#kanji_list + 1] = {
+                kanji = char,
+                meaning = kanji_meanings_map[char]
+            }
+        end
+        i = i + char_len
+    end
+    return kanji_list
+end
+
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- ─── Subtitle Overlay ─────────────────────────────────────────────────────────
@@ -614,6 +671,24 @@ render_popup = function()
         if card.spelling ~= card.reading then h = h + DS.lh_reading end
         h = h + DS.lh_badge + DS.unit           -- state badges row
         h = h + DS.divider_h + DS.unit           -- first divider
+        
+        -- Kanji breakdown section
+        local kanji_list = extract_kanji(card.spelling)
+        if #kanji_list > 0 and #kanji_list <= 4 then
+            -- Grid layout: fixed height boxes
+            h = h + DS.lh_kanji + DS.lh_gloss + 8 + DS.unit
+            h = h + DS.divider_h + DS.unit
+        elseif #kanji_list > 4 then
+            -- Compact inline: estimate wrapped lines
+            local total_len = 0
+            for _, k in ipairs(kanji_list) do
+                total_len = total_len + utf8_len(k.kanji .. k.meaning) + 3
+            end
+            local lines_needed = math.ceil(total_len / 44)
+            h = h + lines_needed * DS.lh_gloss + DS.unit
+            h = h + DS.divider_h + DS.unit
+        end
+        
         local shown, lp = 0, nil
         local total = #(card.meanings or {})
         for _, m in ipairs(card.meanings or {}) do
@@ -713,6 +788,53 @@ render_popup = function()
     -- ── Divider ──────────────────────────────────────────────────────────────
     divider(fg, px+LB+2, cy, W-LB-4)
     cy = cy + DS.divider_h + DS.unit
+
+    -- ── Kanji Breakdown ──────────────────────────────────────────────────────
+    local kanji_list = extract_kanji(card.spelling)
+    if #kanji_list > 0 and #kanji_list <= 4 then
+        -- Grid layout: each kanji in a subtle box with meaning below
+        local kanji_count = #kanji_list
+        local box_width = math.floor((W - LB - PAD*2 - (kanji_count-1)*8) / kanji_count)
+        local box_height = DS.lh_kanji + DS.lh_gloss + 8
+        local start_x = px + cx0
+        
+        for i, k in ipairs(kanji_list) do
+            local bx = start_x + (i-1) * (box_width + 8)
+            
+            -- Subtle background box
+            rect(bg, bx-4, cy-2, box_width, box_height, DS.bg_header, '&H00&')
+            
+            -- Large kanji character
+            textc(fg, bx + box_width/2, cy + DS.lh_kanji/2, 
+                FONT_FAMILY, DS.fs_kanji-4, true, s_color, '&H00&', k.kanji)
+            
+            -- Small meaning below
+            textc(fg, bx + box_width/2, cy + DS.lh_kanji + DS.lh_gloss/2 - 2,
+                FONT_FAMILY, DS.fs_gloss-2, false, DS.col_tertiary, '&H00&', k.meaning)
+        end
+        
+        cy = cy + box_height + DS.unit
+        divider(fg, px+LB+2, cy, W-LB-4)
+        cy = cy + DS.divider_h + DS.unit
+    elseif #kanji_list > 4 then
+        -- Compact inline for many kanji: 人person 気spirit 持have
+        local parts = {}
+        for _, k in ipairs(kanji_list) do
+            parts[#parts + 1] = k.kanji .. k.meaning:sub(1, 1):upper() .. k.meaning:sub(2)
+        end
+        local compact_line = table.concat(parts, '  ·  ')
+        
+        -- Wrap if needed
+        local wrapped = wrap_text(compact_line, 44)
+        for _, line in ipairs(wrapped) do
+            text(fg, cx, cy, FONT_FAMILY, DS.fs_gloss, false, DS.col_tertiary, '&H00&', line)
+            cy = cy + DS.lh_gloss
+        end
+        
+        cy = cy + DS.unit
+        divider(fg, px+LB+2, cy, W-LB-4)
+        cy = cy + DS.divider_h + DS.unit
+    end
 
     -- ── Meanings ─────────────────────────────────────────────────────────────
     local shown, last_pl = 0, nil
