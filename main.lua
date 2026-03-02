@@ -49,6 +49,9 @@ local LOG_PATH   = PLUGIN_DIR .. '/jpdb-debug.log'
 
 local conf = dofile(PLUGIN_DIR .. '/jpdb-config.lua')
 
+-- Load kanji semantic color categories from separate file
+local kanji_semantic_colors = dofile(PLUGIN_DIR .. '/kanji-semantic-colors.lua')
+
 -- Set to true to write a debug log file (jpdb-debug.log) and verbose messages.
 -- Leave false in production — no file is created, dlog() is a no-op.
 local DEBUG_LOG = conf.DEBUG_LOG
@@ -672,20 +675,21 @@ render_popup = function()
         h = h + DS.lh_badge + DS.unit           -- state badges row
         h = h + DS.divider_h + DS.unit           -- first divider
         
-        -- Kanji breakdown section
+        -- Kanji breakdown section - BEYOND THE IMPOSSIBLE
         local kanji_list = extract_kanji(card.spelling)
         if #kanji_list > 0 and #kanji_list <= 4 then
-            -- Grid layout: fixed height boxes
-            h = h + DS.lh_kanji + DS.lh_gloss + 8 + DS.unit
+            -- GIGA DRILL BREAKER: Maximum impact mode
+            h = h + DS.lh_kanji + DS.lh_gloss + 16 + DS.unit
             h = h + DS.divider_h + DS.unit
-        elseif #kanji_list > 4 then
-            -- Compact inline: estimate wrapped lines
-            local total_len = 0
-            for _, k in ipairs(kanji_list) do
-                total_len = total_len + utf8_len(k.kanji .. k.meaning) + 3
-            end
-            local lines_needed = math.ceil(total_len / 44)
-            h = h + lines_needed * DS.lh_gloss + DS.unit
+        elseif #kanji_list > 4 and #kanji_list <= 8 then
+            -- ARC-GURREN LAGANN: Adaptive grid
+            local cols = (#kanji_list <= 6) and 3 or 4
+            local rows = math.ceil(#kanji_list / cols)
+            h = h + rows * (DS.lh_kanji + DS.lh_gloss + 10 + 4) + DS.unit
+            h = h + DS.divider_h + DS.unit
+        elseif #kanji_list > 8 then
+            -- SUPER TENGEN TOPPA: Cosmic ribbon
+            h = h + DS.lh_gloss + 8 + DS.unit
             h = h + DS.divider_h + DS.unit
         end
         
@@ -789,49 +793,189 @@ render_popup = function()
     divider(fg, px+LB+2, cy, W-LB-4)
     cy = cy + DS.divider_h + DS.unit
 
-    -- ── Kanji Breakdown ──────────────────────────────────────────────────────
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- ── KANJI BREAKDOWN: SUPER GALAXY DAI-GURREN MODE ─────────────────────────
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- WHO THE HELL DO YOU THINK WE ARE?!
     local kanji_list = extract_kanji(card.spelling)
+    
+    -- Color coding by semantic category for MAXIMUM INFORMATION DENSITY
+    -- Based on comprehensive linguistic analysis of kanji meanings
+    -- Configuration loaded from kanji-semantic-colors.lua
+    local function get_kanji_color(meaning)
+        local m = meaning:lower()
+        
+        -- Iterate through semantic categories from config
+        for _, category in ipairs(kanji_semantic_colors) do
+            for _, keyword in ipairs(category.keywords) do
+                if m:match(keyword) then
+                    return category.color, category.alpha
+                end
+            end
+        end
+        
+        -- Default = State color (adaptive to card learning state)
+        return s_color, '&H00&'
+    end
+    
     if #kanji_list > 0 and #kanji_list <= 4 then
-        -- Grid layout: each kanji in a subtle box with meaning below
+        -- ═══════════════════════════════════════════════════════════════════
+        -- GIGA DRILL BREAKER MODE: Maximum visual impact per kanji
+        -- ═══════════════════════════════════════════════════════════════════
         local kanji_count = #kanji_list
-        local box_width = math.floor((W - LB - PAD*2 - (kanji_count-1)*8) / kanji_count)
-        local box_height = DS.lh_kanji + DS.lh_gloss + 8
+        local box_width = math.floor((W - LB - PAD*2 - (kanji_count-1)*6) / kanji_count)
+        local box_height = DS.lh_kanji + DS.lh_gloss + 16
         local start_x = px + cx0
         
         for i, k in ipairs(kanji_list) do
-            local bx = start_x + (i-1) * (box_width + 8)
+            local bx = start_x + (i-1) * (box_width + 6)
+            local k_color, k_alpha = get_kanji_color(k.meaning)
             
-            -- Subtle background box
+            -- SPIRAL ENERGY CORE: Multi-layer depth system
+            -- Layer 4: Outer glow (furthest)
+            rect(bg, bx-5, cy+4, box_width+2, box_height, '&H000000&', '&HF0&')
+            -- Layer 3: Deep shadow
+            rect(bg, bx-3, cy+3, box_width, box_height, '&H000000&', '&HD0&')
+            -- Layer 2: Mid shadow with color tint
+            rect(bg, bx-2, cy+2, box_width, box_height, k_color, '&HF8&')
+            -- Layer 1: Light shadow
+            rect(bg, bx-1, cy+1, box_width, box_height, '&H000000&', '&HA0&')
+            
+            -- MAIN CARD: Gradient simulation with multiple strips
             rect(bg, bx-4, cy-2, box_width, box_height, DS.bg_header, '&H00&')
+            -- Top energy bar (KAMINA'S SPIRIT)
+            rect(bg, bx-4, cy-2, box_width, 3, k_color, '&H80&')
+            rect(bg, bx-4, cy-2, box_width, 1, k_color, '&H40&')
+            -- Side accent lines (SPIRAL POWER FLOW)
+            rect(bg, bx-4, cy-2, 2, box_height, k_color, '&HC0&')
+            rect(bg, bx+box_width-6, cy-2, 2, box_height, k_color, '&HC0&')
+            -- Bottom power gauge
+            rect(bg, bx-4, cy+box_height-4, box_width, 3, k_color, '&HA0&')
             
-            -- Large kanji character
-            textc(fg, bx + box_width/2, cy + DS.lh_kanji/2, 
-                FONT_FAMILY, DS.fs_kanji-4, true, s_color, '&H00&', k.kanji)
+            -- CORNER ACCENTS: Like mecha panel lines
+            rect(bg, bx-4, cy-2, 8, 1, k_color, '&H60&')  -- Top-left
+            rect(bg, bx+box_width-12, cy-2, 8, 1, k_color, '&H60&')  -- Top-right
             
-            -- Small meaning below
-            textc(fg, bx + box_width/2, cy + DS.lh_kanji + DS.lh_gloss/2 - 2,
-                FONT_FAMILY, DS.fs_gloss-2, false, DS.col_tertiary, '&H00&', k.meaning)
+            -- KANJI: Triple-layer rendering for MAXIMUM DEPTH
+            -- Shadow layer (offset)
+            textc(fg, bx + box_width/2 + 2, cy + DS.lh_kanji/2 + 4, 
+                FONT_FAMILY, DS.fs_kanji-2, true, '&H000000&', '&HC0&', k.kanji)
+            -- Glow layer (colored)
+            textc(fg, bx + box_width/2 + 1, cy + DS.lh_kanji/2 + 3, 
+                FONT_FAMILY, DS.fs_kanji-2, true, k_color, '&H60&', k.kanji)
+            -- Main layer (crisp)
+            textc(fg, bx + box_width/2, cy + DS.lh_kanji/2 + 2, 
+                FONT_FAMILY, DS.fs_kanji-2, true, k_color, '&H00&', k.kanji)
+            
+            -- MEANING: Dual-layer with background for readability
+            local meaning_y = cy + DS.lh_kanji + DS.lh_gloss/2 + 4
+            -- Background pill for contrast
+            local meaning_width = utf8_len(k.meaning) * 7 + 8
+            rect(bg, bx + box_width/2 - meaning_width/2, meaning_y - DS.lh_gloss/2 + 2,
+                meaning_width, DS.lh_gloss - 2, k_color, '&HE8&')
+            -- Glow text
+            textc(fg, bx + box_width/2 + 1, meaning_y + 1,
+                FONT_FAMILY, DS.fs_gloss-1, true, k_color, '&HD0&', k.meaning)
+            -- Main text
+            textc(fg, bx + box_width/2, meaning_y,
+                FONT_FAMILY, DS.fs_gloss-1, true, DS.col_primary, '&H00&', k.meaning)
+            
+            -- COMBINATION ARROW: Showing the fusion sequence
+            if i < kanji_count then
+                local arrow_x = bx + box_width + 3
+                local arrow_y = cy + box_height/2
+                -- Arrow glow
+                textc(fg, arrow_x + 1, arrow_y + 1,
+                    FONT_FAMILY, DS.fs_gloss + 2, true, k_color, '&HC0&', '⟩')
+                -- Arrow main
+                textc(fg, arrow_x, arrow_y,
+                    FONT_FAMILY, DS.fs_gloss + 2, true, k_color, '&H40&', '⟩')
+            end
+            
+            -- POWER LEVEL INDICATOR: Tiny dots showing position
+            for dot = 1, kanji_count do
+                local dot_x = bx + (dot-1) * 4 + 2
+                local dot_y = cy + box_height - 2
+                local dot_color = (dot == i) and k_color or '&H808080&'
+                local dot_alpha = (dot == i) and '&H40&' or '&HC0&'
+                rect(bg, dot_x, dot_y, 2, 2, dot_color, dot_alpha)
+            end
         end
         
         cy = cy + box_height + DS.unit
         divider(fg, px+LB+2, cy, W-LB-4)
         cy = cy + DS.divider_h + DS.unit
-    elseif #kanji_list > 4 then
-        -- Compact inline for many kanji: 人person 気spirit 持have
+        
+    elseif #kanji_list > 4 and #kanji_list <= 8 then
+        -- ═══════════════════════════════════════════════════════════════════
+        -- ARC-GURREN LAGANN MODE: Compact grid with color coding
+        -- ═══════════════════════════════════════════════════════════════════
+        local cols = (#kanji_list <= 6) and 3 or 4
+        local box_width = math.floor((W - LB - PAD*2 - (cols-1)*5) / cols)
+        local box_height = DS.lh_kanji + DS.lh_gloss + 10
+        local start_x = px + cx0
+        
+        for i, k in ipairs(kanji_list) do
+            local row = math.floor((i-1) / cols)
+            local col = (i-1) % cols
+            local bx = start_x + col * (box_width + 5)
+            local by = cy + row * (box_height + 4)
+            local k_color, k_alpha = get_kanji_color(k.meaning)
+            
+            -- Compact card with energy
+            rect(bg, bx-2, by+1, box_width, box_height, '&H000000&', '&HC0&')  -- Shadow
+            rect(bg, bx-3, by-1, box_width, box_height, DS.bg_header, '&H00&')  -- Main
+            rect(bg, bx-3, by-1, box_width, 2, k_color, '&H80&')  -- Top bar
+            rect(bg, bx-3, by-1, 1, box_height, k_color, '&HC0&')  -- Left line
+            
+            -- Kanji with glow
+            textc(fg, bx + box_width/2 + 1, by + DS.lh_kanji/2 + 1,
+                FONT_FAMILY, DS.fs_kanji-8, true, k_color, '&HC0&', k.kanji)
+            textc(fg, bx + box_width/2, by + DS.lh_kanji/2,
+                FONT_FAMILY, DS.fs_kanji-8, true, k_color, '&H00&', k.kanji)
+            
+            -- Meaning with background
+            local meaning_y = by + DS.lh_kanji + DS.lh_gloss/2
+            textc(fg, bx + box_width/2, meaning_y,
+                FONT_FAMILY, DS.fs_gloss-2, false, DS.col_tertiary, '&H00&', k.meaning)
+        end
+        
+        local rows = math.ceil(#kanji_list / cols)
+        cy = cy + rows * (box_height + 4) + DS.unit
+        divider(fg, px+LB+2, cy, W-LB-4)
+        cy = cy + DS.divider_h + DS.unit
+        
+    elseif #kanji_list > 8 then
+        -- ═══════════════════════════════════════════════════════════════════
+        -- SUPER TENGEN TOPPA GURREN LAGANN MODE: Galaxy-scale display
+        -- ═══════════════════════════════════════════════════════════════════
+        local ribbon_height = DS.lh_gloss + 8
+        
+        -- COSMIC BACKGROUND: Multi-layer energy field
+        rect(bg, cx-8, cy+2, W-LB-PAD*2+16, ribbon_height, '&H000000&', '&HE0&')  -- Outer glow
+        rect(bg, cx-7, cy-4, W-LB-PAD*2+14, ribbon_height, DS.bg_header, '&H00&')  -- Main field
+        
+        -- RAINBOW ENERGY STRIPS: Multiple colored accent lines
+        local strip_colors = {'&H3333FF&', '&HFF33FF&', '&H33FF33&', '&H3399FF&', '&HFFFF33&'}
+        for i, strip_color in ipairs(strip_colors) do
+            rect(bg, cx-7, cy-4 + (i-1)*2, W-LB-PAD*2+14, 1, strip_color, '&HB0&')
+        end
+        
+        -- KANJI STREAM: Ultra-dense with color coding
         local parts = {}
-        for _, k in ipairs(kanji_list) do
-            parts[#parts + 1] = k.kanji .. k.meaning:sub(1, 1):upper() .. k.meaning:sub(2)
+        for i, k in ipairs(kanji_list) do
+            local k_color = get_kanji_color(k.meaning)
+            local short_meaning = k.meaning:sub(1,3)
+            parts[#parts + 1] = k.kanji .. '·' .. short_meaning
         end
-        local compact_line = table.concat(parts, '  ·  ')
+        local cosmic_line = table.concat(parts, ' ')
         
-        -- Wrap if needed
-        local wrapped = wrap_text(compact_line, 44)
-        for _, line in ipairs(wrapped) do
-            text(fg, cx, cy, FONT_FAMILY, DS.fs_gloss, false, DS.col_tertiary, '&H00&', line)
-            cy = cy + DS.lh_gloss
-        end
+        -- Triple-layer text for COSMIC DEPTH
+        text(fg, cx+2, cy+2, FONT_FAMILY, DS.fs_gloss, false, '&H000000&', '&HE0&', cosmic_line)  -- Deep shadow
+        text(fg, cx+1, cy+1, FONT_FAMILY, DS.fs_gloss, false, s_color, '&H80&', cosmic_line)  -- Glow
+        text(fg, cx, cy, FONT_FAMILY, DS.fs_gloss, true, DS.col_primary, '&H00&', cosmic_line)  -- Main
         
-        cy = cy + DS.unit
+        cy = cy + ribbon_height + DS.unit
         divider(fg, px+LB+2, cy, W-LB-4)
         cy = cy + DS.divider_h + DS.unit
     end
