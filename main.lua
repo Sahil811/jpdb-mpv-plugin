@@ -1431,7 +1431,9 @@ local function do_replay_scene()
         -- Timeout must account for the whole duration + lead-in + extra padding at end to let trailing audio finish
         local wait_time = (end_time - start_time) + 0.3 + 0.8
         mp.add_timeout(math.max(0.1, wait_time), function()
+            -- Pause, then warp back slightly before the sub ends to remain locked onto the current subtitle
             mp.set_property_bool('pause', true)
+            mp.commandv('seek', math.max(0, end_time - 0.1), 'absolute+exact')
         end)
         show_popup_toast('⟲ Replaying scene', true)
     else
