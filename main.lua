@@ -445,6 +445,101 @@ local function wrap_text(s, max_ch)
     return lines
 end
 
+-- ─── Pitch Accent Helpers ─────────────────────────────────────────────────────
+
+-- Split a hiragana/katakana reading string into morae.
+-- Handles digraphs (e.g. き+ゃ = きゃ, シ+ョ = ショ) and lone characters.
+local DIGRAPH_SMALL = {
+    -- small hiragana
+    ['ぁ']=true,['ぃ']=true,['ぅ']=true,['ぇ']=true,['ぉ']=true,
+    ['ゃ']=true,['ゅ']=true,['ょ']=true,['ゎ']=true,
+    -- small katakana
+    ['ァ']=true,['ィ']=true,['ゥ']=true,['ェ']=true,['ォ']=true,
+    ['ャ']=true,['ュ']=true,['ョ']=true,['ヮ']=true,
+}
+
+local function split_morae(reading)
+    local morae = {}
+    -- Guard: only accept actual strings
+    if type(reading) ~= 'string' or reading == '' then return morae end
+    local i, len = 1, #reading
+    while i <= len do
+        local b = reading:byte(i)
+        local clen
+        if b < 0x80 then clen = 1
+        elseif b < 0xE0 then clen = 2
+        elseif b < 0xF0 then clen = 3
+        else clen = 4 end
+        local ch = reading:sub(i, i + clen - 1)
+        i = i + clen
+        -- peek at next char — if it is a small kana it merges with current
+        if i <= len then
+            local nb = reading:byte(i)
+            local nlen
+            if nb < 0x80 then nlen = 1
+            elseif nb < 0xE0 then nlen = 2
+            elseif nb < 0xF0 then nlen = 3
+            else nlen = 4 end
+            local nch = reading:sub(i, i + nlen - 1)
+            if DIGRAPH_SMALL[nch] then
+                morae[#morae+1] = ch .. nch
+                i = i + nlen
+            else
+                morae[#morae+1] = ch
+            end
+        else
+            morae[#morae+1] = ch
+        end
+    end
+    return morae
+end
+
+-- Parse JPDB's pitch_accent field.
+-- JPDB returns: an array of strings like ["LHH"] or ["LHHL"]
+-- where L=low mora, H=high mora.
+-- We use the first pattern in the array.
+-- Returns: (pattern_string, label_string) or (nil, nil)
+-- e.g. "LHH" -> ('LHH', '平')  "HLL" -> ('HLL', '頭')
+local function parse_pitch_accent(pa)
+    if not pa then return nil, nil end
+    -- Handle: array of strings
+    if type(pa) == 'table' and #pa > 0 then
+        local first = pa[1]
+        if type(first) == 'string' and #first > 0 then
+            -- Classify pattern for label
+            local pat = first:upper()
+            local label
+            if pat:match('^LH*$') then
+                label = '平'   -- heiban: starts low, all rest high (LHHH...)
+            elseif pat:match('^H') then
+                label = '頭'   -- atamadaka: starts high
+            elseif pat:match('H+L') then
+                label = '中'   -- nakadaka: rises then drops in middle
+            else
+                label = '平'   -- default to heiban
+            end
+            return pat, label
+        end
+    end
+    -- Handle: single string (shouldn't happen but be safe)
+    if type(pa) == 'string' and #pa > 0 then
+        return pa:upper(), '?'
+    end
+    return nil, nil
+end
+
+-- Pitch accent layout constants (JPDB line-style)
+-- Row contains: 3px top line space + kana text + 3px bottom line space + gap
+local PA_KANA_FS  = 18    -- font size for mora kana in the pitch bar
+local PA_KANA_H   = 22    -- pixel height of the kana line
+local PA_LINE_T   = 2     -- thickness of over/underline
+local PA_VERT_T   = 2     -- thickness of vertical connector
+local PA_TOP_PAD  = 4     -- space above kana for the overline
+local PA_BOT_PAD  = 4     -- space below kana for the underline
+local PA_MORA_W   = 22    -- fixed width per mora cell
+local PA_GAP      = 2     -- horizontal gap between mora cells (for vertical line)
+local PA_ROW_H    = PA_TOP_PAD + PA_KANA_H + PA_BOT_PAD + PA_LINE_T + 6
+
 -- Extract individual kanji characters from a string
 local function extract_kanji(text)
     local kanji_list = {}
@@ -669,9 +764,19 @@ render_popup = function()
     local cx0 = LB + PAD  -- content x offset from popup left
 
     -- ── Height measurement pass ──────────────────────────────────────────────
+    -- Pre-parse pitch accent so measure_h and render both use it
+    -- Use pcall to make absolutely sure a bad PA value can't crash the popup
+    local pa_raw     = card.pitchAccent
+    local pa_reading  = type(card.reading) == 'string' and card.reading or ''
+    local pa_morae    = split_morae(pa_reading)
+    local pa_pat, pa_label = parse_pitch_accent(pa_raw)
+    local pa_pat_len  = pa_pat and #pa_pat or 0
+    local has_pitch   = (pa_pat ~= nil and pa_pat_len > 0 and #pa_morae > 0)
+
     local function measure_h()
         local h = DS.pad_v + DS.lh_kanji
         if card.spelling ~= card.reading then h = h + DS.lh_reading end
+        if has_pitch then h = h + PA_ROW_H + DS.unit end  -- pitch accent bar
         h = h + DS.lh_badge + DS.unit           -- state badges row
         h = h + DS.divider_h + DS.unit           -- first divider
         
@@ -756,6 +861,7 @@ render_popup = function()
     -- ── Header zone (slightly different bg) ──────────────────────────────────
     local hdr_h = DS.pad_v + DS.lh_kanji
     if card.spelling ~= card.reading then hdr_h = hdr_h + DS.lh_reading end
+    if has_pitch then hdr_h = hdr_h + PA_ROW_H + DS.unit end
     hdr_h = hdr_h + DS.lh_badge + DS.unit
     rect(bg, px+LB, py, W-LB, hdr_h, DS.bg_header, '&H00&')
 
@@ -770,6 +876,99 @@ render_popup = function()
     if card.spelling ~= card.reading then
         text(fg, cx, cy, FONT_FAMILY, DS.fs_reading, false, DS.col_secondary, '&H00&', card.reading)
         cy = cy + DS.lh_reading
+    end
+
+    -- ── Pitch Accent Visualization (JPDB style) ───────────────────────────────
+    -- Red overline = HIGH, Blue underline = LOW, Red vertical = transition
+    -- Matches the official jpdb.io pitch accent display exactly.
+    if has_pitch then
+        local ok, err_pa = pcall(function()
+            local n = #pa_morae
+            if n == 0 or not pa_pat then return end
+
+            -- is_high(i): read directly from LH string, clamp at end
+            local function is_high(mi)
+                local idx = math.min(mi, pa_pat_len)
+                return pa_pat:sub(idx, idx) == 'H'
+            end
+
+            -- ASS colors (BGR format)
+            local COL_HIGH    = '&H4343E0&'   -- red   (#E04343 → BGR E04343 → &H4343E0&)
+            local COL_LOW     = '&HE16941&'   -- blue  (#4169E1 → BGR 4169E1 → &HE16941&)
+            local COL_CONN    = '&H4343E0&'   -- vertical connectors = red
+            local COL_LABEL   = '&HC0A880&'   -- warm-gray label
+            local AL_SOLID    = '&H00&'
+            local AL_SEMI     = '&H60&'       -- semi-transparent for kana
+
+            -- Mora cell width: use fixed width clamped to available space
+            local avail_w   = W - LB - PAD * 2 - 28  -- 28px for label
+            local mora_w    = math.min(PA_MORA_W + 4,
+                math.max(PA_MORA_W - 4, math.floor(avail_w / n) - PA_GAP))
+            local total_w   = n * mora_w + (n - 1) * PA_GAP
+
+            -- Layout anchors
+            local row_top   = cy              -- top of the pitch row
+            local kana_y    = row_top + PA_TOP_PAD      -- top of kana text
+            local over_y    = row_top                   -- overline y (top)
+            local under_y   = kana_y + PA_KANA_H + 2   -- underline y (below kana)
+
+            local cur_x = cx
+
+            for mi = 1, n do
+                local high     = is_high(mi)
+                local cell_x   = cur_x
+                local cell_end = cell_x + mora_w  -- exclusive right edge
+
+                -- ── Horizontal line above (H) or below (L) the kana ──────────
+                if high then
+                    -- RED overline above the kana
+                    rect(bg, cell_x, over_y, mora_w, PA_LINE_T, COL_HIGH, AL_SOLID)
+                else
+                    -- BLUE underline below the kana
+                    rect(bg, cell_x, under_y, mora_w, PA_LINE_T, COL_LOW, AL_SOLID)
+                end
+
+                -- ── Kana text centred in the cell ────────────────────────────
+                textc(fg, cell_x + mora_w / 2, kana_y + PA_KANA_H / 2,
+                    FONT_FAMILY, PA_KANA_FS, false,
+                    '&HFAF8F2&', AL_SOLID, tostring(pa_morae[mi]))
+
+                -- ── Vertical connector at left edge (transition from prev) ──
+                if mi > 1 then
+                    local prev_high = is_high(mi - 1)
+                    if prev_high ~= high then
+                        -- Transition: draw red vertical line bridging over_y ↔ under_y
+                        -- at the left edge of this mora cell (= right edge of gap)
+                        local vx = cell_x - PA_GAP  -- in the gap between moras
+                        -- Full vertical span from overline to underline height
+                        local vy1 = over_y
+                        local vy2 = under_y + PA_LINE_T
+                        rect(bg, vx, vy1, PA_VERT_T, vy2 - vy1, COL_CONN, AL_SOLID)
+                    end
+                end
+
+                -- ── Odaka trailing drop: vertical line after last mora ────────
+                if mi == n then
+                    -- If last mora is HIGH and pattern label is '尾' (odaka),
+                    -- draw a trailing drop line on the right side
+                    if high and pa_label == '尾' then
+                        rect(bg, cell_end, over_y, PA_VERT_T, under_y - over_y + PA_LINE_T, COL_CONN, AL_SOLID)
+                    end
+                end
+
+                cur_x = cur_x + mora_w + PA_GAP
+            end
+
+            -- ── Pattern label (平/頭/中/尾) to the right ─────────────────────
+            -- cur_x already advanced to right edge after loop
+            local label_cx = cx + total_w + 10
+            textc(fg, label_cx, kana_y + PA_KANA_H / 2,
+                FONT_FAMILY, 13, false, COL_LABEL, AL_SOLID, pa_label or '?')
+        end)
+        if not ok then
+            dlog('[pitch_accent] render error: ' .. tostring(err_pa))
+        end
+        cy = cy + PA_ROW_H + DS.unit
     end
 
     -- ── State badges ─────────────────────────────────────────────────────────
