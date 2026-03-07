@@ -1065,6 +1065,102 @@ func logMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// ─── Word Audio Proxy ─────────────────────────────────────────────────────────
+
+func handleWordAudio(w http.ResponseWriter, r *http.Request) {
+	vid := r.URL.Query().Get("vid")
+	spelling := r.URL.Query().Get("spelling")
+	reading := r.URL.Query().Get("reading")
+
+	if vid == "" {
+		http.Error(w, "missing vid", http.StatusBadRequest)
+		return
+	}
+
+	// 1. Fetch vocabulary page to find the audio hash
+	vocabUrl := fmt.Sprintf("https://jpdb.io/vocabulary/%s/%s/%s", vid, spelling, reading)
+	if spelling == "" {
+		vocabUrl = fmt.Sprintf("https://jpdb.io/vocabulary/%s/a/a", vid)
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), "GET", vocabUrl, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+	if cookie := getStoredCookie(); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+
+	res, err := jpdbClient.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("jpdb vocab fetch failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		http.Error(w, fmt.Sprintf("vocab page returned %d", res.StatusCode), res.StatusCode)
+		return
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		http.Error(w, "failed to read HTML", http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Extract data-audio hash
+	re := regexp.MustCompile(`data-audio="([^"]+)"`)
+	matches := re.FindAllStringSubmatch(string(body), -1)
+	if len(matches) == 0 {
+		http.Error(w, "no audio hash found", http.StatusNotFound)
+		return
+	}
+	hash := matches[0][1]
+
+	// 3. Fetch the actual encrypted audio
+	audioUrl := "https://jpdb.io/static/v/" + hash
+	req2, err := http.NewRequestWithContext(r.Context(), "GET", audioUrl, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req2.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+	req2.Header.Set("X-Access", "please don't steal these files")
+
+	res2, err := jpdbClient.Do(req2)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("audio fetch failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer res2.Body.Close()
+
+	if res2.StatusCode != http.StatusOK {
+		http.Error(w, fmt.Sprintf("audio returned %d", res2.StatusCode), res2.StatusCode)
+		return
+	}
+
+	// 4. Decrypt XOR'd OGG header (first 4 bytes) and stream
+	audioBytes, err := io.ReadAll(res2.Body)
+	if err != nil {
+		http.Error(w, "failed to read audio", http.StatusInternalServerError)
+		return
+	}
+
+	if len(audioBytes) > 4 {
+		audioBytes[0] ^= 0x06
+		audioBytes[1] ^= 0x23
+		audioBytes[2] ^= 0x54
+		audioBytes[3] ^= 0x0f
+	}
+
+	w.Header().Set("Content-Type", "audio/ogg")
+	w.Header().Set("Cache-Control", "public, max-age=31536000") // 1 year
+	w.Write(audioBytes)
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 func main() {
@@ -1124,6 +1220,7 @@ func main() {
 	mux.HandleFunc("POST /lookup", handleLookup)
 	mux.HandleFunc("POST /register", handleRegister)
 	mux.HandleFunc("POST /unregister", handleUnregister)
+	mux.HandleFunc("GET /word-audio", handleWordAudio)
 
 	handler := logMiddleware(corsMiddleware(mux))
 

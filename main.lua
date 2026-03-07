@@ -268,6 +268,15 @@ local function http_request_async(method, path, body_table, on_done)
     end)
 end
 
+local function url_encode(str)
+    if not str then return '' end
+    str = string.gsub(str, "\n", "\r\n")
+    str = string.gsub(str, "([^%w _%%%-%.~])", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end)
+    str = string.gsub(str, " ", "+")
+    return str
+end
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- ─── UTF-8 / Unicode Width ────────────────────────────────────────────────────
@@ -807,9 +816,10 @@ render_popup = function()
             shown = shown + 1
         end
         if total > MAX_MEANINGS then h = h + DS.lh_gloss end -- "…N more" line
-        if popup_toast_text then h = h + DS.unit + DS.lh_toast end
+        -- Always allocate space for toast so the popup never changes size
+        h = h + DS.unit + DS.lh_toast
         h = h + DS.unit * 2 + DS.divider_h + DS.unit
-        -- Only one button row now (Never Forget only)
+        -- Only one button row now
         h = h + DS.bh_action + DS.pad_v
         return h
     end
@@ -1194,13 +1204,14 @@ render_popup = function()
     end
 
     -- ── Inline toast (action feedback) ───────────────────────────────────────
+    -- Always advance `cy` so button position doesn't shift, but only draw text if visible
+    cy = cy + DS.unit
     if popup_toast_text then
-        cy = cy + DS.unit
         local tcol = popup_toast_ok and DS.col_toast_ok or DS.col_toast_err
         textc(fg, px + W/2, cy + DS.lh_toast/2,
             FONT_FAMILY, DS.fs_toast, true, tcol, '&H00&', popup_toast_text)
-        cy = cy + DS.lh_toast
     end
+    cy = cy + DS.lh_toast
 
     -- ── Divider ──────────────────────────────────────────────────────────────
     cy = cy + DS.unit * 2
@@ -1226,19 +1237,27 @@ render_popup = function()
             { x1=bx2, y1=by, x2=bx2+bw, y2=by+bh, key=key, action=action, args=args }
     end
 
-    -- ── Action row - Only Never Forget button ────────────────────────────────
+    -- ── Action row - Replay | Never Forget | Audio ───────────────────────────
     local never_forgot = false
     for _, s in ipairs(card.state) do
         if s == 'never-forget' then never_forgot = true end
     end
 
-    -- Single centered button
-    local btn_width = math.floor((W - LB - PAD*2) * 0.6)  -- 60% of available width
-    local btn_x = px + cx0 + math.floor(((W - LB - PAD*2) - btn_width) / 2)  -- Center it
-    btn(never_forgot and '★ Remove Never Forget' or '★ Never Forget',
+    -- Symmetrical layout: Never Forget (50%) | gap | Replay (25%) | gap | Audio (25%)
+    local total_w = W - LB - PAD * 2
+    local gap = 6
+    local side_w = math.floor((total_w - gap * 2) * 0.25)
+    local center_w = total_w - (side_w * 2 + gap * 2)
+
+    local bx = px + cx0
+    btn(never_forgot and '★ Remove' or '★ Never Forget',
         'never-forget', 'set-flag', { flag='never-forget', state=not never_forgot }, 
-        btn_x, cy, btn_width, DS.bh_action)
-    cy = cy + DS.bh_action + DS.btn_gap
+        bx, cy, center_w, DS.bh_action)
+    bx = bx + center_w + gap
+    btn('⟲ Replay', 'replay', 'replay-scene', {}, bx, cy, side_w, DS.bh_action, DS.fs_btn_act - 2)
+    bx = bx + side_w + gap
+    btn('🔊 Audio', 'audio', 'play-audio', {}, bx, cy, side_w, DS.bh_action, DS.fs_btn_act - 2)
+    cy = cy + DS.bh_action + gap
 
     --[[ DISABLED: Add and Blacklist buttons
     local aw   = math.floor((W - LB - PAD*2 - DS.btn_gap*2) / 3)
@@ -1376,12 +1395,58 @@ local function do_set_flag(card, flag, state)
         end)
 end
 
+local last_audio_time = 0
+
+local function do_play_audio(card)
+    local now = mp.get_time()
+    if now - last_audio_time < 1.0 then return end
+    last_audio_time = now
+
+    local vid, sid = card.vid, card.sid
+    if vid and sid then
+        local sp = url_encode(card.spelling or '')
+        local rd = url_encode(card.reading or '')
+        local url = SERVER_URL .. '/word-audio?vid=' .. tostring(vid) .. '&spelling=' .. sp .. '&reading=' .. rd
+        mp.command_native_async({
+            name = 'subprocess',
+            args = {'mpv', '--no-video', '--really-quiet', '--volume=70', url},
+            detach = true,
+            playback_only = false
+        }, function() end)
+        show_popup_toast('🔊 Playing audio: ' .. card.reading, true)
+    else
+        show_popup_toast('✕ No audio available', false)
+    end
+end
+
+local function do_replay_scene()
+    local start_time = mp.get_property_number('sub-start')
+    local end_time = mp.get_property_number('sub-end')
+    
+    if start_time and end_time then
+        -- Seek back with 0.3s lead-in
+        mp.commandv('seek', math.max(0, start_time - 0.3), 'absolute+exact')
+        mp.set_property_bool('pause', false)
+        
+        -- Timeout must account for the whole duration + lead-in + extra padding at end to let trailing audio finish
+        local wait_time = (end_time - start_time) + 0.3 + 0.8
+        mp.add_timeout(math.max(0.1, wait_time), function()
+            mp.set_property_bool('pause', true)
+        end)
+        show_popup_toast('⟲ Replaying scene', true)
+    else
+        show_popup_toast('✕ Subtitle timing not found', false)
+    end
+end
+
 local function dispatch_button(b)
     if not popup_token then return end
     local card = popup_token.card
-    if     b.action == 'review'   then do_review(card, b.args.rating)
-    elseif b.action == 'mine'     then do_mine(card, current_text)
-    elseif b.action == 'set-flag' then do_set_flag(card, b.args.flag, b.args.state)
+    if     b.action == 'review'       then do_review(card, b.args.rating)
+    elseif b.action == 'mine'         then do_mine(card, current_text)
+    elseif b.action == 'set-flag'     then do_set_flag(card, b.args.flag, b.args.state)
+    elseif b.action == 'play-audio'   then do_play_audio(card)
+    elseif b.action == 'replay-scene' then do_replay_scene()
     end
 end
 
