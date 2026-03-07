@@ -776,7 +776,6 @@ render_popup = function()
     local function measure_h()
         local h = DS.pad_v + DS.lh_kanji
         if card.spelling ~= card.reading then h = h + DS.lh_reading end
-        if has_pitch then h = h + PA_ROW_H + DS.unit end  -- pitch accent bar
         h = h + DS.lh_badge + DS.unit           -- state badges row
         h = h + DS.divider_h + DS.unit           -- first divider
         
@@ -861,7 +860,6 @@ render_popup = function()
     -- ── Header zone (slightly different bg) ──────────────────────────────────
     local hdr_h = DS.pad_v + DS.lh_kanji
     if card.spelling ~= card.reading then hdr_h = hdr_h + DS.lh_reading end
-    if has_pitch then hdr_h = hdr_h + PA_ROW_H + DS.unit end
     hdr_h = hdr_h + DS.lh_badge + DS.unit
     rect(bg, px+LB, py, W-LB, hdr_h, DS.bg_header, '&H00&')
 
@@ -878,9 +876,9 @@ render_popup = function()
         cy = cy + DS.lh_reading
     end
 
-    -- ── Pitch Accent Visualization (JPDB style) ───────────────────────────────
-    -- Red overline = HIGH, Blue underline = LOW, Red vertical = transition
-    -- Matches the official jpdb.io pitch accent display exactly.
+    -- ── Pitch Accent Visualization — RIGHT SIDE of header (JPDB style) ───────
+    -- Floats to the right of the kanji/reading, vertically centred in header.
+    -- Red overline = HIGH, Blue underline = LOW, Red vertical = transition.
     if has_pitch then
         local ok, err_pa = pcall(function()
             local n = #pa_morae
@@ -893,82 +891,71 @@ render_popup = function()
             end
 
             -- ASS colors (BGR format)
-            local COL_HIGH    = '&H4343E0&'   -- red   (#E04343 → BGR E04343 → &H4343E0&)
-            local COL_LOW     = '&HE16941&'   -- blue  (#4169E1 → BGR 4169E1 → &HE16941&)
-            local COL_CONN    = '&H4343E0&'   -- vertical connectors = red
-            local COL_LABEL   = '&HC0A880&'   -- warm-gray label
-            local AL_SOLID    = '&H00&'
-            local AL_SEMI     = '&H60&'       -- semi-transparent for kana
+            local COL_HIGH  = '&H4343E0&'   -- red   #E04343
+            local COL_LOW   = '&HE16941&'   -- blue  #4169E1
+            local COL_CONN  = '&H4343E0&'   -- vertical connector = red
+            local COL_LABEL = '&HC0A880&'   -- warm-gray label
+            local AL_SOLID  = '&H00&'
 
-            -- Mora cell width: use fixed width clamped to available space
-            local avail_w   = W - LB - PAD * 2 - 28  -- 28px for label
-            local mora_w    = math.min(PA_MORA_W + 4,
-                math.max(PA_MORA_W - 4, math.floor(avail_w / n) - PA_GAP))
-            local total_w   = n * mora_w + (n - 1) * PA_GAP
+            -- Right-side anchor: right-aligned inside popup
+            local right_edge = px + W - PAD        -- right margin
+            -- Mora cell sizing: fit up to 10 moras, clamp between 18-26px wide
+            local max_bar_w  = math.min(W - LB - PAD * 2 - 10, 160)  -- max bar takes right portion
+            local mora_w = math.min(26, math.max(18,
+                math.floor((max_bar_w - n * PA_GAP) / n)))
+            local total_w = n * mora_w + (n - 1) * PA_GAP
 
-            -- Layout anchors
-            local row_top   = cy              -- top of the pitch row
-            local kana_y    = row_top + PA_TOP_PAD      -- top of kana text
-            local over_y    = row_top                   -- overline y (top)
-            local under_y   = kana_y + PA_KANA_H + 2   -- underline y (below kana)
+            -- Horizontal: right-align the bar
+            local bar_right = right_edge
+            local bar_x     = bar_right - total_w
 
-            local cur_x = cx
+            -- Vertical: center within the kanji+reading text zone
+            local hdr_text_h = DS.lh_kanji + (card.spelling ~= card.reading and DS.lh_reading or 0)
+            local center_y   = py + DS.pad_v + hdr_text_h / 2
+            local over_y     = math.floor(center_y - PA_KANA_H / 2 - PA_TOP_PAD)
+            local kana_y     = over_y + PA_TOP_PAD
+            local under_y    = kana_y + PA_KANA_H + 2
 
+            local cur_x = bar_x
             for mi = 1, n do
                 local high     = is_high(mi)
                 local cell_x   = cur_x
-                local cell_end = cell_x + mora_w  -- exclusive right edge
+                local cell_end = cell_x + mora_w
 
-                -- ── Horizontal line above (H) or below (L) the kana ──────────
+                -- Horizontal line: RED overline (H) or BLUE underline (L)
                 if high then
-                    -- RED overline above the kana
                     rect(bg, cell_x, over_y, mora_w, PA_LINE_T, COL_HIGH, AL_SOLID)
                 else
-                    -- BLUE underline below the kana
                     rect(bg, cell_x, under_y, mora_w, PA_LINE_T, COL_LOW, AL_SOLID)
                 end
 
-                -- ── Kana text centred in the cell ────────────────────────────
+                -- Kana text centred in cell
                 textc(fg, cell_x + mora_w / 2, kana_y + PA_KANA_H / 2,
-                    FONT_FAMILY, PA_KANA_FS, false,
+                    FONT_FAMILY, PA_KANA_FS - 2, false,
                     '&HFAF8F2&', AL_SOLID, tostring(pa_morae[mi]))
 
-                -- ── Vertical connector at left edge (transition from prev) ──
-                if mi > 1 then
-                    local prev_high = is_high(mi - 1)
-                    if prev_high ~= high then
-                        -- Transition: draw red vertical line bridging over_y ↔ under_y
-                        -- at the left edge of this mora cell (= right edge of gap)
-                        local vx = cell_x - PA_GAP  -- in the gap between moras
-                        -- Full vertical span from overline to underline height
-                        local vy1 = over_y
-                        local vy2 = under_y + PA_LINE_T
-                        rect(bg, vx, vy1, PA_VERT_T, vy2 - vy1, COL_CONN, AL_SOLID)
-                    end
+                -- Red vertical connector at pitch transitions
+                if mi > 1 and is_high(mi - 1) ~= high then
+                    local vx  = cell_x - PA_GAP
+                    local vy1 = over_y
+                    local vy2 = under_y + PA_LINE_T
+                    rect(bg, vx, vy1, PA_VERT_T, vy2 - vy1, COL_CONN, AL_SOLID)
                 end
 
-                -- ── Odaka trailing drop: vertical line after last mora ────────
-                if mi == n then
-                    -- If last mora is HIGH and pattern label is '尾' (odaka),
-                    -- draw a trailing drop line on the right side
-                    if high and pa_label == '尾' then
-                        rect(bg, cell_end, over_y, PA_VERT_T, under_y - over_y + PA_LINE_T, COL_CONN, AL_SOLID)
-                    end
+                -- Odaka trailing drop after last mora
+                if mi == n and high and pa_label == '尾' then
+                    rect(bg, cell_end, over_y, PA_VERT_T,
+                        under_y - over_y + PA_LINE_T, COL_CONN, AL_SOLID)
                 end
 
                 cur_x = cur_x + mora_w + PA_GAP
             end
 
-            -- ── Pattern label (平/頭/中/尾) to the right ─────────────────────
-            -- cur_x already advanced to right edge after loop
-            local label_cx = cx + total_w + 10
-            textc(fg, label_cx, kana_y + PA_KANA_H / 2,
-                FONT_FAMILY, 13, false, COL_LABEL, AL_SOLID, pa_label or '?')
+            -- Pattern label to the LEFT of the bar — larger, bold, easy to read
+            textc(fg, bar_x - 14, kana_y + PA_KANA_H / 2,
+                FONT_FAMILY, 20, true, '&HEED8B0&', AL_SOLID, pa_label or '?')
         end)
-        if not ok then
-            dlog('[pitch_accent] render error: ' .. tostring(err_pa))
-        end
-        cy = cy + PA_ROW_H + DS.unit
+        if not ok then dlog('[pitch_accent] render error: ' .. tostring(err_pa)) end
     end
 
     -- ── State badges ─────────────────────────────────────────────────────────
