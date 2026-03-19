@@ -229,6 +229,20 @@ local last_hover_time      = 0  -- for adaptive debounce
 local osd_w = 1280
 local osd_h = 720
 
+-- Screen (window) dimensions for coordinate scaling.
+-- mouse-pos returns raw window pixels; subtitle regions live in OSD space.
+local screen_w = 0
+local screen_h = 0
+
+-- Convert raw window pixel coords → OSD resolution coords.
+-- When screen size is unknown, falls back to identity (assumes 1:1).
+local function screen_to_osd(sx, sy)
+    if screen_w > 0 and screen_h > 0 then
+        return sx * osd_w / screen_w, sy * osd_h / screen_h
+    end
+    return sx, sy
+end
+
 -- Subtitle ASS cache
 local cached_sub_ass      = nil
 local cached_sub_token_id = nil
@@ -676,9 +690,10 @@ local function render_subtitles()
     for li, ln in ipairs(layout.lines) do
         local from_bottom = layout.n - li
         local line_bottom = layout.sub_y - from_bottom * LINE_H
-        -- Vertical hit region: cap height of glyph with 2px border
-        local y1 = line_bottom - math.floor(SUB_CONF.font_size * 0.96) - 4
-        local y2 = line_bottom + 8
+        -- Vertical hit region: ascender-to-descender range with generous padding.
+        -- font_size * 0.92 ≈ visual cap height; +6 above for ascenders, +10 below for descenders
+        local y1 = line_bottom - math.floor(SUB_CONF.font_size * 0.92) - 6
+        local y2 = line_bottom + 10
 
         local px_map, total_px = build_px_map(ln.text)
         local line_left = sub_x - total_px / 2
@@ -686,9 +701,10 @@ local function render_subtitles()
         local lbe = lbs + #ln.text
 
         -- Build hit regions sorted by span length (shorter = higher priority)
+        -- Strict bounds: token must start AND end within this line's byte range
         local line_toks = {}
         for _, tok in ipairs(current_tokens) do
-            if tok.start >= lbs and tok['end'] <= lbe + 1 then
+            if tok.start >= lbs and tok['end'] <= lbe then
                 line_toks[#line_toks+1] = tok
             end
         end
@@ -701,9 +717,13 @@ local function render_subtitles()
             local le = tok['end'] - lbs  -- 0-indexed
             local px0 = px_map[ls + 1] or 0
             local px1 = px_map[le + 1] or total_px
+            -- Expand narrow tokens (< 30px wide) by a few pixels each side
+            -- so single-kana particles are easier to target.
+            local raw_w = px1 - px0
+            local pad_x = (raw_w < 30) and math.floor((30 - raw_w) / 2) or 0
             subtitle_regions[#subtitle_regions+1] = {
-                x1    = math.floor(line_left + px0),
-                x2    = math.floor(line_left + px1),
+                x1    = math.floor(line_left + px0) - pad_x,
+                x2    = math.floor(line_left + px1) + pad_x,
                 y1    = y1,
                 y2    = y2,
                 token = tok,
@@ -1308,15 +1328,35 @@ local function find_hovered_token(mx, my)
         end
     end
     if best then return best end
-    -- Pass 2: 10 px proximity fallback
-    local best2, best_dist = nil, math.huge
+
+    -- Pass 2: graduated proximity (relax X by 14px, Y by 6px).
+    -- Score = edge distance (smaller = better); tie-break by span length.
+    local PROX_X, PROX_Y = 14, 6
+    local best2, best_score, best2_span = nil, math.huge, math.huge
     for _, r in ipairs(subtitle_regions) do
-        if my >= r.y1 and my <= r.y2 and mx >= r.x1-10 and mx <= r.x2+10 then
-            local d = math.abs(mx - (r.x1+r.x2)*0.5)
-            if d < best_dist then best_dist = d; best2 = r.token end
+        if my >= r.y1 - PROX_Y and my <= r.y2 + PROX_Y and
+           mx >= r.x1 - PROX_X and mx <= r.x2 + PROX_X then
+            -- Distance from the nearest edge of the region (0 if inside)
+            local dx = (mx < r.x1) and (r.x1 - mx) or (mx > r.x2) and (mx - r.x2) or 0
+            local dy = (my < r.y1) and (r.y1 - my) or (my > r.y2) and (my - r.y2) or 0
+            local score = dx * dx + dy * dy  -- squared Euclidean; no sqrt needed
+            if score < best_score or (score == best_score and r.span < best2_span) then
+                best_score = score; best2_span = r.span; best2 = r.token
+            end
         end
     end
-    return best2
+    if best2 then return best2 end
+
+    -- Pass 3: wider X search (28px) if cursor is on the correct Y line.
+    -- Only activates when nothing was found in pass 2 — catches edge glyphs.
+    local best3, best3_dist = nil, math.huge
+    for _, r in ipairs(subtitle_regions) do
+        if my >= r.y1 and my <= r.y2 and mx >= r.x1 - 28 and mx <= r.x2 + 28 then
+            local dx = (mx < r.x1) and (r.x1 - mx) or (mx > r.x2) and (mx - r.x2) or 0
+            if dx < best3_dist then best3_dist = dx; best3 = r.token end
+        end
+    end
+    return best3
 end
 
 local function find_hovered_button(mx, my)
@@ -1549,13 +1589,14 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
     if mouse_timer then return end
     mouse_timer = mp.add_timeout(0.016, function()
         mouse_timer = nil
-        local mx, my = hover_x, hover_y
+        -- Transform raw window pixels → OSD coordinate space
+        local mx, my = screen_to_osd(hover_x, hover_y)
 
         -- 1. Popup safe-zone ──────────────────────────────────────────────────
         if popup_visible and popup_rect then
-            local pad = 18
-            if mx >= popup_rect.x1-pad and mx <= popup_rect.x2+pad and
-               my >= popup_rect.y1-pad and my <= popup_rect.y2+pad then
+            local pad_x, pad_y = 14, 12
+            if mx >= popup_rect.x1 - pad_x and mx <= popup_rect.x2 + pad_x and
+               my >= popup_rect.y1 - pad_y and my <= popup_rect.y2 + pad_y then
                 if hover_debounce_timer then
                     hover_debounce_timer:kill(); hover_debounce_timer = nil
                 end
@@ -1574,12 +1615,27 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                 end
                 return
             end
+
+            -- 1b. Bridge corridor: if popup is above subtitles, create a
+            -- vertical corridor between popup bottom and subtitle top so
+            -- the cursor can travel between them without triggering close.
+            local layout_bridge = subtitle_layout()
+            local sub_top = layout_bridge.sub_text_top
+            if popup_rect.y2 < sub_top and
+               my >= popup_rect.y2 and my <= sub_top + 10 and
+               mx >= popup_rect.x1 - 20 and mx <= popup_rect.x2 + 20 then
+                -- In the bridge: don't close, don't change anything
+                return
+            end
         end
 
         -- 2. Subtitle interaction zone guard ──────────────────────────────────
+        -- Tighter zone: only the popup height above the subtitle top, plus
+        -- a modest buffer below for descenders.
         local layout  = subtitle_layout()
-        local zone_y1 = math.max(0, layout.sub_text_top - 500)
-        local zone_y2 = layout.sub_y + 50
+        local popup_h = (popup_rect and (popup_rect.y2 - popup_rect.y1)) or 0
+        local zone_y1 = math.max(0, layout.sub_text_top - popup_h - 40)
+        local zone_y2 = layout.sub_y + 30
         if my < zone_y1 or my > zone_y2 then
             if popup_visible or hovered_token then close_popup() end
             return
@@ -1643,7 +1699,8 @@ local function handle_left_click(event)
     dlog('[handle_left_click] popup_visible=' .. tostring(popup_visible))
     if popup_visible then
         -- FIX: dispatch BEFORE close so button action fires correctly
-        local b = find_hovered_button(hover_x, hover_y)
+        local cmx, cmy = screen_to_osd(hover_x, hover_y)
+        local b = find_hovered_button(cmx, cmy)
         dlog('[handle_left_click] button found=' .. tostring(b ~= nil))
         if b then
             dlog('[handle_left_click] Button clicked: ' .. b.key)
@@ -1779,6 +1836,18 @@ mp.observe_property('osd-height', 'number', function(_, h)
     if sub_osd   then sub_osd.res_y   = osd_h end
     if popup_osd then popup_osd.res_y = osd_h end
     render_subtitles(); render_popup()
+end)
+
+-- Track actual window dimensions for mouse coordinate scaling.
+-- osd-dimensions gives the real pixel size of the OSD area;
+-- mouse-pos returns coordinates in this space.
+mp.observe_property('osd-dimensions', 'native', function(_, dim)
+    if dim then
+        if dim.w and dim.w > 0 then screen_w = dim.w end
+        if dim.h and dim.h > 0 then screen_h = dim.h end
+        dlog('[osd-dimensions] screen=' .. screen_w .. 'x' .. screen_h
+             .. ' osd=' .. osd_w .. 'x' .. osd_h)
+    end
 end)
 
 mp.register_event('shutdown', function()
