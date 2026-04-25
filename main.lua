@@ -52,6 +52,16 @@ local conf = dofile(PLUGIN_DIR .. '/jpdb-config.lua')
 -- Load kanji semantic color categories from separate file
 local kanji_semantic_colors = dofile(PLUGIN_DIR .. '/kanji-semantic-colors.lua')
 
+-- Pre-build keyword lookup table for O(1) semantic color matching
+local kanji_color_exact = {}   -- exact word match: keyword → {color, alpha}
+local kanji_color_patterns = {} -- for substring/pattern matching fallback
+for _, category in ipairs(kanji_semantic_colors) do
+    for _, keyword in ipairs(category.keywords) do
+        local kw = keyword:lower()
+        kanji_color_exact[kw] = { color = category.color, alpha = category.alpha }
+    end
+end
+
 -- Set to true to write a debug log file (jpdb-debug.log) and verbose messages.
 -- Leave false in production — no file is created, dlog() is a no-op.
 local DEBUG_LOG = conf.DEBUG_LOG
@@ -180,7 +190,44 @@ mp.add_timeout(0.3, function()
     end)
 end)
 
+-- ─── Server health monitoring ─────────────────────────────────────────────────
+-- Periodically check if the server is still alive. If it's down, attempt re-launch.
+local server_health_timer = nil
+local server_was_up = false
+local server_reconnect_attempts = 0
 
+local function start_health_monitor()
+    if server_health_timer then return end
+    server_health_timer = mp.add_periodic_timer(30, function()
+        server_ping(function(up)
+            if up then
+                if not server_was_up then
+                    dlog('[jpdb] Server recovered')
+                    mp.osd_message('[jpdb] Server reconnected ✓', 2)
+                    register_with_server()
+                    server_reconnect_attempts = 0
+                end
+                server_was_up = true
+            else
+                if server_was_up then
+                    dlog('[jpdb] Server connection lost — attempting restart')
+                    mp.osd_message('[jpdb] Server lost — restarting…', 3)
+                end
+                server_was_up = false
+                if server_reconnect_attempts < 3 then
+                    server_reconnect_attempts = server_reconnect_attempts + 1
+                    launch_server_then_register()
+                end
+            end
+        end)
+    end)
+end
+
+-- Start health monitoring after initial connection
+mp.add_timeout(5, function()
+    server_was_up = true
+    start_health_monitor()
+end)
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- ─── Design Tokens ────────────────────────────────────────────────────────────
@@ -224,6 +271,7 @@ local popup_rect        = nil
 local hover_pending_token  = nil
 local hover_debounce_timer = nil
 local last_hover_time      = 0  -- for adaptive debounce
+local resize_timer = nil
 
 -- OSD canvas
 local osd_w = 1280
@@ -246,6 +294,8 @@ end
 -- Subtitle ASS cache
 local cached_sub_ass      = nil
 local cached_sub_token_id = nil
+local kanji_extract_cache = {}
+local last_popup_render_key = nil
 
 -- Inline toast inside popup
 local popup_toast_text  = nil
@@ -320,10 +370,16 @@ local function char_px(s, i)
         -- U+3000..U+FFFF  → lead E3..EF is full-width
         -- BUT U+FF65..U+FF9F (halfwidth Katakana) lead=EF, b2=BD
         if b >= 0xE3 then
-            if b == 0xEF and b2 == 0xBD then
-                -- U+FF40..U+FF7F — halfwidth Katakana starts at 0xEF 0xBD 0xA5
-                local b3 = s:byte(i + 2) or 0x80
-                if b3 >= 0xA5 then return PX_HALF, i + 3 end -- halfwidth kana
+            if b == 0xEF then
+                if b2 == 0xBD then
+                    -- U+FF40..U+FF7F — halfwidth Katakana starts at 0xEF 0xBD 0xA5
+                    local b3 = s:byte(i + 2) or 0x80
+                    if b3 >= 0xA5 then return PX_HALF, i + 3 end
+                elseif b2 == 0xBE then
+                    -- U+FF80..U+FF9F — more halfwidth Katakana
+                    local b3 = s:byte(i + 2) or 0x80
+                    if b3 >= 0x80 and b3 <= 0x9F then return PX_HALF, i + 3 end
+                end
             end
             return PX_FULL, i + 3
         end
@@ -565,6 +621,7 @@ local PA_ROW_H    = PA_TOP_PAD + PA_KANA_H + PA_BOT_PAD + PA_LINE_T + 6
 
 -- Extract individual kanji characters from a string
 local function extract_kanji(text)
+    if kanji_extract_cache[text] then return kanji_extract_cache[text] end
     local kanji_list = {}
     local i = 1
     local len = #text
@@ -582,7 +639,6 @@ local function extract_kanji(text)
         end
         
         local char = text:sub(i, i + char_len - 1)
-        -- Check if this character has a meaning (is a kanji)
         if kanji_meanings_map[char] then
             kanji_list[#kanji_list + 1] = {
                 kanji = char,
@@ -591,6 +647,7 @@ local function extract_kanji(text)
         end
         i = i + char_len
     end
+    kanji_extract_cache[text] = kanji_list
     return kanji_list
 end
 
@@ -782,6 +839,14 @@ render_popup = function()
     end
 
     popup_buttons = {}
+
+    local render_key = string.format('%s:%s:%s:%s:%s',
+        tostring(popup_token and popup_token.card and popup_token.card.vid),
+        tostring(popup_token and popup_token.card and popup_token.card.sid),
+        tostring(hovered_button),
+        tostring(popup_toast_text),
+        tostring(popup_rect and popup_rect.x1))
+    if render_key == last_popup_render_key then return end
 
     local card    = popup_token.card
     local state   = get_primary_state(card.state)
@@ -1020,17 +1085,12 @@ render_popup = function()
     -- Configuration loaded from kanji-semantic-colors.lua
     local function get_kanji_color(meaning)
         local m = meaning:lower()
-        
-        -- Iterate through semantic categories from config
-        for _, category in ipairs(kanji_semantic_colors) do
-            for _, keyword in ipairs(category.keywords) do
-                if m:match(keyword) then
-                    return category.color, category.alpha
-                end
-            end
+        -- O(1) exact word check against all keywords
+        for word in m:gmatch('%a+') do
+            local entry = kanji_color_exact[word]
+            if entry then return entry.color, entry.alpha end
         end
-        
-        -- Default = State color (adaptive to card learning state)
+        -- Default = State color
         return s_color, '&H00&'
     end
     
@@ -1314,10 +1374,11 @@ render_popup = function()
         popup_osd.data = new_data
         popup_osd:update()
     end
+    last_popup_render_key = render_key
 end
 
 
--- ─── Hit testing ──────────────────────────────────────────────────────────────
+-- ─── Hit testing──────────────────────────────────────────────────────────────
 
 local function find_hovered_token(mx, my)
     -- Pass 1: exact hit; prefer shorter spans (resolved during region build)
@@ -1514,6 +1575,8 @@ local function on_subtitle_change(_, new_text)
     subtitle_regions    = {}
     cached_sub_ass      = nil
     cached_sub_token_id = nil
+    kanji_extract_cache = {}
+    last_popup_render_key = nil
     render_popup()
 
     if not new_text or new_text == '' then
@@ -1567,6 +1630,7 @@ local function close_popup()
     hovered_button   = nil
     hovered_token    = nil
     popup_toast_text = nil
+    last_popup_render_key = nil
     if popup_toast_timer then popup_toast_timer:kill(); popup_toast_timer = nil end
     if hover_debounce_timer then hover_debounce_timer:kill(); hover_debounce_timer = nil end
     hover_pending_token = nil
@@ -1824,18 +1888,30 @@ mp.register_event('file-loaded', function()
     if #current_tokens > 0 then render_subtitles() end
 end)
 
+local function debounced_resize_render()
+    if resize_timer then resize_timer:kill() end
+    resize_timer = mp.add_timeout(0.05, function()
+        resize_timer = nil
+        cached_sub_ass = nil
+        cached_sub_token_id = nil
+        last_popup_render_key = nil
+        render_subtitles()
+        render_popup()
+    end)
+end
+
 mp.observe_property('osd-width', 'number', function(_, w)
     if w and w > 0 then osd_w = w end
     if sub_osd   then sub_osd.res_x   = osd_w end
     if popup_osd then popup_osd.res_x = osd_w end
-    render_subtitles(); render_popup()
+    debounced_resize_render()
 end)
 
 mp.observe_property('osd-height', 'number', function(_, h)
     if h and h > 0 then osd_h = h end
     if sub_osd   then sub_osd.res_y   = osd_h end
     if popup_osd then popup_osd.res_y = osd_h end
-    render_subtitles(); render_popup()
+    debounced_resize_render()
 end)
 
 -- Track actual window dimensions for mouse coordinate scaling.
