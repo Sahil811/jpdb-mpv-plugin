@@ -412,6 +412,13 @@ end
 -- map[#text+1] = total pixel width (sentinel).
 --
 -- If server-measured px_map is available (from font metrics), uses it for
+-- ─── ASS helpers ──────────────────────────────────────────────────────────────
+
+local function esc(s)
+    if not s then return '' end
+    return (s:gsub('\\','\\\\'):gsub('{','\\{'):gsub('}','\\}'):gsub('\n','\\N'))
+end
+
 -- Build byte→pixel cumulative map for one line of text (RAW metric space).
 -- map[k] = px offset of the character whose first byte is at 1-indexed position k.
 -- map[#text+1] = total pixel width (sentinel).
@@ -469,7 +476,12 @@ end
 -- Uses \an2 centered positioning to match actual rendering, but strips
 -- border/shadow so we get pure text advance width.
 local MEASURE_OSD_ID = 99
+local compute_bounds_available = nil  -- nil = untested, true/false = tested
+
 local function measure_line_bounds(text, font_size)
+    -- Skip if compute_bounds was already found unavailable
+    if compute_bounds_available == false then return nil end
+
     local key = text .. '@@' .. font_size .. '@@' .. osd_w .. '@@' .. osd_h
     if bounds_cache[key] then return bounds_cache[key] end
 
@@ -486,15 +498,18 @@ local function measure_line_bounds(text, font_size)
         res_y = osd_h,
         compute_bounds = true,
     })
-    -- Remove measurement overlay immediately (never displayed)
+    -- Remove measurement overlay immediately so it's never visible
     pcall(mp.command_native, {
         name = 'osd-overlay',
         id = MEASURE_OSD_ID,
-        format = 'none',
+        format = 'ass-events',
         data = '',
+        res_x = osd_w,
+        res_y = osd_h,
     })
 
-    if ok and res and type(res) == 'table' and res.x0 and res.x1 then
+    if ok and res and type(res) == 'table' and res.x0 and res.x1 and res.x1 > res.x0 then
+        compute_bounds_available = true
         local result = { x0 = res.x0, x1 = res.x1, width = res.x1 - res.x0 }
         bounds_cache[key] = result
         dlog('[measure_line_bounds] "' .. text:sub(1, 20) .. '…" → x0='
@@ -503,7 +518,11 @@ local function measure_line_bounds(text, font_size)
              .. string.format('%.1f', result.width))
         return result
     end
-    dlog('[measure_line_bounds] compute_bounds unavailable or failed')
+
+    if compute_bounds_available == nil then
+        compute_bounds_available = false
+        dlog('[measure_line_bounds] compute_bounds not available in this mpv version, using fallback')
+    end
     return nil
 end
 
@@ -540,13 +559,6 @@ local function split_lines(text)
     return result
 end
 
-
--- ─── ASS helpers ──────────────────────────────────────────────────────────────
-
-local function esc(s)
-    if not s then return '' end
-    return (s:gsub('\\','\\\\'):gsub('{','\\{'):gsub('}','\\}'):gsub('\n','\\N'))
-end
 
 local fmt = string.format
 
