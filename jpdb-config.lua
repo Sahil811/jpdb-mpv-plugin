@@ -368,7 +368,7 @@ local SUBTITLE_OVERLAY = {
     -- bg_radius: corner rounding (0 = sharp corners, higher = more rounded).
     -- Color & alpha come from the active theme (sub_bg_color, sub_bg_alpha).
     bg_enabled    = true,
-    bg_style      = 'unified', -- 'unified' or 'per_line'
+    bg_style      = 'per_line', -- 'unified' or 'per_line'
     bg_pad_h      = 18,    -- horizontal padding (px)
     bg_pad_v      = 10,    -- vertical padding (px)
     bg_radius     = 10,    -- corner radius (px)
