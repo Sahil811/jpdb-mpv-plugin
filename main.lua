@@ -2302,7 +2302,7 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                         popup_toast_text = nil
                         render_popup()
                         toggle_click_bindings(true)
-                    elseif not popup_visible then
+                    else
                         close_popup()
                     end
                 end)
