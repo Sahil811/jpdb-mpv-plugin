@@ -88,9 +88,11 @@ local SUBTITLE_OVERLAY = {
     px_half      = 32,   -- ASCII letters, digits, Latin extensions
     px_narrow    = 18,   -- ASCII punctuation, spaces (.,!?;:'" etc.)
 
-    -- Global width multiplier. Adjust if hover regions are systematically
-    -- too wide (< 1.0) or too narrow (> 1.0) for your font/display.
-    width_scale  = 1.0,
+    -- Global width multiplier applied to server font metrics.
+    -- Compensates for differences between our Go font metrics and libass's
+    -- FreeType rendering. Use Ctrl+= / Ctrl+- in mpv to tune in real-time.
+    -- Decrease if hover regions are too wide (edges inaccurate).
+    width_scale  = 0.935,
 
     line_h       = 72,
 

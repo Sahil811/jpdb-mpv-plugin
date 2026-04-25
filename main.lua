@@ -2110,6 +2110,27 @@ mp.add_key_binding('n', 'jpdb-never-forget', function()
 end)
 
 
+-- ─── Width scale calibration ──────────────────────────────────────────────────
+-- Press Ctrl+= / Ctrl+- to adjust width_scale in real-time.
+-- This compensates for the difference between our font metrics and libass's.
+-- Once you find a value that makes hover accurate, set it in jpdb-config.lua.
+
+local function adjust_width_scale(delta)
+    SUB_CONF.width_scale = math.max(0.80, math.min(1.20,
+        (SUB_CONF.width_scale or 1.0) + delta))
+    -- Clear caches to force re-render with new scale
+    cached_sub_ass = nil
+    cached_sub_token_id = nil
+    cached_sub_regions = nil
+    cached_sub_line_data = nil
+    render_subtitles()
+    mp.osd_message(string.format('width_scale = %.3f', SUB_CONF.width_scale), 2)
+end
+
+mp.add_key_binding('ctrl+=', 'jpdb-scale-up',   function() adjust_width_scale(0.005) end)
+mp.add_key_binding('ctrl+-', 'jpdb-scale-down', function() adjust_width_scale(-0.005) end)
+
+
 -- ─── Overlay init & resize ────────────────────────────────────────────────────
 
 local function init_overlays()
