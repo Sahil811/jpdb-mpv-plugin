@@ -52,15 +52,74 @@ local conf = dofile(PLUGIN_DIR .. '/jpdb-config.lua')
 -- Load kanji semantic color categories from separate file
 local kanji_semantic_colors = dofile(PLUGIN_DIR .. '/kanji-semantic-colors.lua')
 
--- Pre-build keyword lookup table for O(1) semantic color matching
-local kanji_color_exact = {}   -- exact word match: keyword → {color, alpha}
-local kanji_color_patterns = {} -- for substring/pattern matching fallback
+-- Pre-build keyword lookup tables for semantic color matching
+-- Multi-word phrases get priority; single words are fallback.
+-- First category to register a keyword wins (no duplicates overwrite).
+local kanji_color_exact  = {}   -- single word → {color, alpha}
+local kanji_color_phrase = {}   -- multi-word phrase → {color, alpha}
 for _, category in ipairs(kanji_semantic_colors) do
+    local entry = { color = category.color, alpha = category.alpha }
     for _, keyword in ipairs(category.keywords) do
         local kw = keyword:lower()
-        kanji_color_exact[kw] = { color = category.color, alpha = category.alpha }
+        if kw:find(' ') then
+            -- Multi-word phrase: indexed separately for priority matching
+            if not kanji_color_phrase[kw] then
+                kanji_color_phrase[kw] = entry
+            end
+        else
+            -- Single word: first category wins
+            if not kanji_color_exact[kw] then
+                kanji_color_exact[kw] = entry
+            end
+        end
     end
 end
+
+-- Basic English stemming for fuzzy keyword matching.
+-- Strips common suffixes so "feelings"→"feel", "accomplished"→"accomplish", etc.
+local function stem_word(w)
+    -- Don't stem very short words
+    if #w <= 4 then return w end
+    -- Order matters: try longest suffixes first
+    local rules = {
+        {'iness$',   4}, -- happiness → happ... skip, too aggressive
+        {'ement$',   5}, -- achievement → achiev
+        {'ation$',   4}, -- transformation → transform
+        {'ition$',   4}, -- transition → trans... (keep 'ition' removal)
+        {'sion$',    3}, -- explosion → explo... (keep)
+        {'ness$',    4}, -- darkness → dark
+        {'ment$',    4}, -- judgement → judge
+        {'ment$',    4}, -- equipment → equip
+        {'able$',    4}, -- comfortable → comfort
+        {'ible$',    4}, -- terrible → terr
+        {'ting$',    3}, -- meeting → meet
+        {'ling$',    3}, -- bustling → bust
+        {'ful$',     3}, -- peaceful → peace
+        {'ous$',     3}, -- dangerous → danger
+        {'ive$',     3}, -- excessive → excess
+        {'ing$',     3}, -- fishing → fish
+        {'ise$',     3}, -- supervise → superv... skip
+        {'ize$',     3}, -- harmonize → harmon
+        {'ied$',     3}, -- hurried → hurr
+        {'ted$',     2}, -- defeated → defeat... try 'ed' instead
+        {'ed$',      2}, -- accomplished → accomplish
+        {'al$',      2}, -- additional → addition
+        {'ly$',      2}, -- gradually → gradual
+        {'er$',      2}, -- lighter → light
+        {'or$',      2}, -- superior → superi
+        {'es$',      2}, -- ashes → ash
+        {'s$',       1}, -- feelings → feeling
+    }
+    for _, rule in ipairs(rules) do
+        local suffix, min_remain = rule[1], rule[2]
+        local stripped = w:gsub(suffix, '')
+        if stripped ~= w and #stripped >= min_remain then
+            return stripped
+        end
+    end
+    return w
+end
+
 
 -- Set to true to write a debug log file (jpdb-debug.log) and verbose messages.
 -- Leave false in production — no file is created, dlog() is a no-op.
@@ -1295,10 +1354,21 @@ render_popup = function()
     -- Configuration loaded from kanji-semantic-colors.lua
     local function get_kanji_color(meaning)
         local m = meaning:lower()
-        -- O(1) exact word check against all keywords
+        -- 1. Try full phrase match first (highest priority)
+        local phrase_entry = kanji_color_phrase[m]
+        if phrase_entry then return phrase_entry.color, phrase_entry.alpha end
+        -- 2. Try exact single-word match
         for word in m:gmatch('%a+') do
             local entry = kanji_color_exact[word]
             if entry then return entry.color, entry.alpha end
+        end
+        -- 3. Try stemmed word match (fuzzy fallback)
+        for word in m:gmatch('%a+') do
+            local stemmed = stem_word(word)
+            if stemmed ~= word then
+                local entry = kanji_color_exact[stemmed]
+                if entry then return entry.color, entry.alpha end
+            end
         end
         -- Default = State color
         return s_color, '&H00&'
