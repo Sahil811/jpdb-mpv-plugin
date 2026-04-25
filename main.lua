@@ -911,8 +911,8 @@ local function render_subtitles()
         return
     end
 
-    -- Cache key includes osd_w because line_left depends on it
-    local tok_id = #current_tokens .. ':' .. tostring(hovered_token) .. ':' .. osd_w
+    -- Cache key includes osd dimensions because layout depends on both
+    local tok_id = #current_tokens .. ':' .. tostring(hovered_token) .. ':' .. osd_w .. ':' .. osd_h
 
     -- Fast path: if nothing changed, restore cached ASS + hit data
     if cached_sub_token_id == tok_id and cached_sub_ass and cached_sub_regions then
@@ -929,6 +929,56 @@ local function render_subtitles()
     local sub_x  = math.floor(osd_w / 2)
     -- ASS tag: explicit font + zero letter spacing for predictable glyph widths
     local tag_prefix = '\\fn' .. FONT_FAMILY .. '\\fsp0\\bord2\\shad1\\b0'
+
+    -- Pre-wrap: split lines that are wider than the screen so our layout model
+    -- (background rects, hit regions) matches what libass would render.
+    local max_sub_w = osd_w * 0.85
+    local wrapped = {}
+    for _, ln in ipairs(layout.lines) do
+        local bounds = measure_line_bounds(ln.text, SUB_CONF.font_size)
+        if bounds and bounds.width > max_sub_w and #ln.text > 4 then
+            local lbs = ln.byte_start
+            local lbe = lbs + #ln.text
+            -- Collect unique token-boundary byte positions within this line
+            local splits = {}
+            for _, tok in ipairs(current_tokens) do
+                local ts, te = tok.start, tok['end']
+                if ts > lbs and ts < lbe then splits[#splits+1] = ts end
+                if te > lbs and te < lbe then splits[#splits+1] = te end
+            end
+            table.sort(splits)
+            -- Deduplicate
+            local uniq = {}
+            for _, s in ipairs(splits) do
+                if #uniq == 0 or uniq[#uniq] ~= s then uniq[#uniq+1] = s end
+            end
+            -- Pick the split closest to the visual midpoint
+            local best, best_dist = nil, math.huge
+            if #uniq > 0 then
+                local target = bounds.width / 2
+                for _, s in ipairs(uniq) do
+                    local prefix = ln.text:sub(1, s - lbs)
+                    local pb = measure_line_bounds(prefix, SUB_CONF.font_size)
+                    if pb then
+                        local d = math.abs(pb.width - target)
+                        if d < best_dist then best_dist = d; best = s end
+                    end
+                end
+            end
+            if best then
+                local s1 = best - lbs
+                wrapped[#wrapped+1] = { text = ln.text:sub(1, s1),     byte_start = lbs  }
+                wrapped[#wrapped+1] = { text = ln.text:sub(s1 + 1),    byte_start = best }
+            else
+                wrapped[#wrapped+1] = ln
+            end
+        else
+            wrapped[#wrapped+1] = ln
+        end
+    end
+    layout.lines = wrapped
+    layout.n = #wrapped
+    layout.sub_text_top = layout.sub_y - layout.n * LINE_H
 
     local line_parts = {}
 
