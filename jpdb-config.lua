@@ -81,10 +81,16 @@ local SUBTITLE_OVERLAY = {
     pos_y_offset = 90,
     font_size    = 60,  
 
-    -- Glyph width tracking for hit detection (3 width classes)
+    -- Glyph width tracking for hit detection (3 width classes).
+    -- These values are calibrated for Yu Gothic UI at font_size=60.
+    -- When font_size changes, widths auto-scale proportionally.
     px_full      = 60,   -- CJK ideographs, hiragana, katakana, fullwidth punct
     px_half      = 32,   -- ASCII letters, digits, Latin extensions
     px_narrow    = 18,   -- ASCII punctuation, spaces (.,!?;:'" etc.)
+
+    -- Global width multiplier. Adjust if hover regions are systematically
+    -- too wide (< 1.0) or too narrow (> 1.0) for your font/display.
+    width_scale  = 1.0,
 
     line_h       = 72,
 

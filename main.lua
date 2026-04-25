@@ -294,6 +294,7 @@ end
 -- Subtitle ASS cache
 local cached_sub_ass      = nil
 local cached_sub_token_id = nil
+local cached_sub_regions  = nil
 local kanji_extract_cache = {}
 local last_popup_render_key = nil
 
@@ -346,16 +347,20 @@ end
 -- ─── UTF-8 / Unicode Width ────────────────────────────────────────────────────
 -- ══════════════════════════════════════════════════════════════════════════════
 --
--- Glyph widths matched to \\fs48 rendering in Yu Gothic UI:
---   Full-width (48 px): CJK ideographs, Hiragana, Katakana, fullwidth Latin/punct
---   Half-width (26 px): ASCII, Latin extensions, Greek, halfwidth Katakana
+-- Glyph widths auto-scaled from font_size.
+-- Base ratios calibrated for Yu Gothic UI; override with width_scale in config.
 
 local SUB_CONF = conf.SUBTITLE_OVERLAY
-local PX_FULL   = SUB_CONF.px_full
-local PX_HALF   = SUB_CONF.px_half
-local PX_NARROW = SUB_CONF.px_narrow or 18
 local LINE_H    = SUB_CONF.line_h
 local BORD_W    = SUB_CONF.bord_w or 2
+
+-- Auto-scale character widths: base values are for font_size=60.
+-- When font_size changes, widths scale proportionally.
+local _font_scale  = SUB_CONF.font_size / 60
+local _width_scale = (SUB_CONF.width_scale or 1.0) * _font_scale
+local PX_FULL   = (SUB_CONF.px_full or 60)   * _width_scale
+local PX_HALF   = (SUB_CONF.px_half or 32)   * _width_scale
+local PX_NARROW = (SUB_CONF.px_narrow or 18) * _width_scale
 
 -- Returns (pixel_width, next_byte_index) for the UTF-8 character at byte i.
 -- Refined classification vs v2:
@@ -664,28 +669,37 @@ end
 -- ─── Subtitle Overlay ─────────────────────────────────────────────────────────
 -- ══════════════════════════════════════════════════════════════════════════════
 
--- Build the ASS inline tag string for a subtitle.
+-- Build ASS inline tags for ONE subtitle line (not the full text).
+-- line_start / line_end are 0-indexed byte offsets into raw_text.
 -- Hovered token → full colour + underline
 -- Other tokens  → dim colour (focus contrast)
 -- Gaps          → white
-local function build_subtitle_ass(tokens, raw_text)
-    if not tokens or #tokens == 0 then return nil end
-    local parts = {}
-    local last  = 0
-    -- Sort by start, resolve overlaps: prefer shorter span
+local function build_line_subtitle_ass(tokens, raw_text, line_start, line_end)
+    -- Filter and sort tokens that fall within this line
     local sorted = {}
-    for _, t in ipairs(tokens) do sorted[#sorted+1] = t end
+    for _, t in ipairs(tokens) do
+        if t.start >= line_start and t['end'] <= line_end then
+            sorted[#sorted+1] = t
+        end
+    end
+    if #sorted == 0 then
+        -- No tokens on this line — render as plain white text
+        local has_hovered = (hovered_token ~= nil)
+        local gap_al = has_hovered and '&H22&' or '&H00&'
+        return '{\\c&HFFFFFF&\\1a' .. gap_al .. '\\u0}' .. esc(raw_text:sub(line_start + 1, line_end))
+    end
     table.sort(sorted, function(a, b)
         if a.start ~= b.start then return a.start < b.start end
         return (a['end'] - a.start) < (b['end'] - b.start)
     end)
 
+    local parts = {}
+    local last  = line_start
     local has_hovered = (hovered_token ~= nil)
 
     for _, tok in ipairs(sorted) do
         if tok.start >= last then
             if tok.start > last then
-                -- gap text: pure white, slightly dim if something is hovered
                 local gap_al = has_hovered and '&H22&' or '&H00&'
                 parts[#parts+1] = '{\\c&HFFFFFF&\\1a' .. gap_al .. '\\u0}'
                 parts[#parts+1] = esc(raw_text:sub(last + 1, tok.start))
@@ -703,10 +717,10 @@ local function build_subtitle_ass(tokens, raw_text)
         end
     end
 
-    if last < #raw_text then
+    if last < line_end then
         local gap_al = has_hovered and '&H22&' or '&H00&'
         parts[#parts+1] = '{\\c&HFFFFFF&\\1a' .. gap_al .. '\\u0}'
-        parts[#parts+1] = esc(raw_text:sub(last + 1))
+        parts[#parts+1] = esc(raw_text:sub(last + 1, line_end))
     end
     return table.concat(parts)
 end
@@ -734,27 +748,30 @@ local function render_subtitles()
         return
     end
 
-    local tok_id = #current_tokens .. ':' .. tostring(hovered_token)
-    local ass_content
-    if cached_sub_token_id == tok_id and cached_sub_ass then
-        ass_content = cached_sub_ass
-    else
-        ass_content         = build_subtitle_ass(current_tokens, current_text)
-        cached_sub_ass      = ass_content
-        cached_sub_token_id = tok_id
-    end
+    -- Cache key includes osd_w because line_left depends on it
+    local tok_id = #current_tokens .. ':' .. tostring(hovered_token) .. ':' .. osd_w
 
-    if not ass_content then
-        if sub_osd.data ~= '' then sub_osd.data = ''; sub_osd:update() end
+    -- Fast path: if nothing changed, restore cached ASS + hit regions
+    if cached_sub_token_id == tok_id and cached_sub_ass and cached_sub_regions then
+        subtitle_regions = cached_sub_regions
+        if sub_osd.data ~= cached_sub_ass then
+            sub_osd.data = cached_sub_ass
+            sub_osd:update()
+        end
         return
     end
 
     local layout = subtitle_layout()
-    local sub_x  = math.floor(osd_w / 2)
+    -- ASS tag prefix: explicit font, zero letter spacing, no smart wrapping
+    local tag_prefix = '\\fn' .. FONT_FAMILY .. '\\fs' .. SUB_CONF.font_size
+                    .. '\\fsp0\\fscx100\\fscy100\\bord2\\shad1\\b0'
+
+    local a = assdraw.ass_new()
 
     for li, ln in ipairs(layout.lines) do
         local from_bottom = layout.n - li
         local line_bottom = layout.sub_y - from_bottom * LINE_H
+
         -- Vertical hit region calibrated to font metrics + border
         local ascent  = SUB_CONF.ascent_ratio or 0.88
         local descent = SUB_CONF.descent_ratio or 0.15
@@ -763,12 +780,21 @@ local function render_subtitles()
         local y2 = line_bottom + math.floor(SUB_CONF.font_size * descent) + BORD_W + vpad
 
         local px_map, total_px = build_px_map(ln.text)
-        local line_left = sub_x - total_px / 2
+        -- Use float for precise centering; \an1 bottom-left anchors at our computed edge
+        local line_left = osd_w / 2 - total_px / 2
         local lbs = ln.byte_start
         local lbe = lbs + #ln.text
 
+        -- Per-line ASS event with \an1 (bottom-left): WE control left edge position,
+        -- eliminating the centering mismatch between our width model and ASS renderer.
+        local line_ass = build_line_subtitle_ass(current_tokens, current_text, lbs, lbe)
+        if line_ass and #line_ass > 0 then
+            a:new_event()
+            a:append('{\\an1\\pos(' .. line_left .. ',' .. line_bottom .. ')' .. tag_prefix .. '}')
+            a:append(line_ass)
+        end
+
         -- Build hit regions sorted by span length (shorter = higher priority)
-        -- Strict bounds: token must start AND end within this line's byte range
         local line_toks = {}
         for _, tok in ipairs(current_tokens) do
             if tok.start >= lbs and tok['end'] <= lbe then
@@ -784,18 +810,12 @@ local function render_subtitles()
             local le = tok['end'] - lbs  -- 0-indexed
             local px0 = px_map[ls + 1] or 0
             local px1 = px_map[le + 1] or total_px
-            -- Expand narrow tokens (< 30px wide) by a few pixels each side
-            -- so single-kana particles are easier to target.
+            -- Expand narrow tokens (< 30px wide) so single-kana particles are easier to target
             local raw_w = px1 - px0
             local pad_x = (raw_w < 30) and math.floor((30 - raw_w) / 2) or 0
-            -- Drift compensation: add proportional expansion based on distance from center
-            -- Characters farther from center accumulate more estimation error
-            local center_offset = math.abs((px0 + px1) / 2 - total_px / 2)
-            local drift_pad = math.floor(center_offset * 0.04)  -- ~4% expansion per distance from center
-            pad_x = pad_x + drift_pad
             subtitle_regions[#subtitle_regions+1] = {
-                x1    = math.floor(line_left + px0) - pad_x - BORD_W,
-                x2    = math.floor(line_left + px1) + pad_x + BORD_W,
+                x1    = line_left + px0 - pad_x - BORD_W,
+                x2    = line_left + px1 + pad_x + BORD_W,
                 y1    = y1,
                 y2    = y2,
                 token = tok,
@@ -804,15 +824,26 @@ local function render_subtitles()
         end
     end
 
-    local a = assdraw.ass_new()
-    a:new_event()
-    a:append('{\\an2\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')\\fs' .. SUB_CONF.font_size .. '\\bord2\\shad1\\b0}')
-    a:append(ass_content)
+    -- Debug: visualize hit regions as semi-transparent rectangles
+    if conf.DEBUG_LOG then
+        for _, r in ipairs(subtitle_regions) do
+            a:new_event()
+            a:append('{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H00FFFF&\\1a&HCC&\\p1}')
+            a:append('m ' .. math.floor(r.x1) .. ' ' .. math.floor(r.y1)
+                  .. ' l ' .. math.floor(r.x2) .. ' ' .. math.floor(r.y1)
+                  .. ' l ' .. math.floor(r.x2) .. ' ' .. math.floor(r.y2)
+                  .. ' l ' .. math.floor(r.x1) .. ' ' .. math.floor(r.y2))
+        end
+    end
 
-    if sub_osd.data ~= a.text then
-        sub_osd.data = a.text
+    local new_data = a.text
+    if sub_osd.data ~= new_data then
+        sub_osd.data = new_data
         sub_osd:update()
     end
+    cached_sub_ass      = new_data
+    cached_sub_token_id = tok_id
+    cached_sub_regions  = subtitle_regions
 end
 
 
@@ -1478,6 +1509,7 @@ local function refresh_after_action()
         current_tokens      = res.tokens
         cached_sub_ass      = nil
         cached_sub_token_id = nil
+        cached_sub_regions  = nil
         if popup_visible and popup_token then
             dlog('[refresh_after_action] Popup visible, updating tokens')
             for _, tok in ipairs(current_tokens) do
@@ -1611,6 +1643,7 @@ local function on_subtitle_change(_, new_text)
     subtitle_regions    = {}
     cached_sub_ass      = nil
     cached_sub_token_id = nil
+    cached_sub_regions  = nil
     kanji_extract_cache = {}
     last_popup_render_key = nil
     render_popup()
@@ -1631,6 +1664,7 @@ local function on_subtitle_change(_, new_text)
                 current_tokens      = res.tokens
                 cached_sub_ass      = nil
                 cached_sub_token_id = nil
+                cached_sub_regions  = nil
                 render_subtitles()
             end
         end)
@@ -1672,6 +1706,7 @@ local function close_popup()
     hover_pending_token = nil
     cached_sub_ass      = nil
     cached_sub_token_id = nil
+    cached_sub_regions  = nil
     render_popup()
     render_subtitles()
     jpdb_resume()
@@ -1706,6 +1741,7 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                     hovered_token = popup_token
                     cached_sub_ass = nil
                     cached_sub_token_id = nil
+                    cached_sub_regions = nil
                     render_subtitles()
                 end
                 local hit = find_hovered_button(mx, my)
@@ -1765,6 +1801,7 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                     hovered_token       = hover_pending_token
                     cached_sub_ass      = nil
                     cached_sub_token_id = nil
+                    cached_sub_regions  = nil
                     render_subtitles()
                     if hovered_token then
                         jpdb_pause()
@@ -1821,6 +1858,7 @@ local function handle_left_click(event)
                 hovered_token = popup_token
                 cached_sub_ass = nil
                 cached_sub_token_id = nil
+                cached_sub_regions = nil
                 dlog('[handle_left_click] About to render_subtitles')
                 render_subtitles()
                 dlog('[handle_left_click] After render_subtitles')
@@ -1930,6 +1968,7 @@ local function debounced_resize_render()
         resize_timer = nil
         cached_sub_ass = nil
         cached_sub_token_id = nil
+        cached_sub_regions = nil
         last_popup_render_key = nil
         render_subtitles()
         render_popup()
