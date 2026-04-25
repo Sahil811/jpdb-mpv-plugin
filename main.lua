@@ -298,6 +298,9 @@ local cached_sub_ass      = nil
 local cached_sub_token_id = nil
 local cached_sub_regions  = nil
 local cached_sub_line_data = nil
+
+-- compute_bounds cache: keyed on (text, font_size, osd_w, osd_h)
+local bounds_cache = {}
 local kanji_extract_cache = {}
 local last_popup_render_key = nil
 
@@ -409,16 +412,17 @@ end
 -- map[#text+1] = total pixel width (sentinel).
 --
 -- If server-measured px_map is available (from font metrics), uses it for
--- pixel-accurate widths. Falls back to estimated char_px() model otherwise.
--- width_scale adjusts for any systematic difference between our font metrics
--- and libass's actual rendering.
+-- Build byte→pixel cumulative map for one line of text (RAW metric space).
+-- map[k] = px offset of the character whose first byte is at 1-indexed position k.
+-- map[#text+1] = total pixel width (sentinel).
+--
+-- Returns raw server font metrics without any scaling — the caller applies
+-- compute_bounds calibration (cal_scale) to convert to screen space.
 local function build_px_map(text, line_byte_start)
     -- Try server-measured pixel map first (line_byte_start is 0-indexed global offset)
     if current_px_map and line_byte_start then
         local map = {}
         local len = #text
-        local ws = SUB_CONF.width_scale or 1.0
-        -- Look up each character's global byte position in the server map
         local first_px = nil
         local i = 1
         while i <= len do
@@ -426,7 +430,7 @@ local function build_px_map(text, line_byte_start)
             local px_val = current_px_map[global_byte]
             if px_val then
                 if not first_px then first_px = px_val end
-                map[i] = (px_val - first_px) * ws
+                map[i] = px_val - first_px
             end
             -- Advance to next character
             local b = text:byte(i)
@@ -439,7 +443,7 @@ local function build_px_map(text, line_byte_start)
         local end_byte = line_byte_start + len + 1
         local end_px = current_px_map[end_byte]
         if first_px and end_px then
-            local total = (end_px - first_px) * ws
+            local total = end_px - first_px
             map[len + 1] = total
             return map, total
         end
@@ -458,6 +462,49 @@ local function build_px_map(text, line_byte_start)
     end
     map[len + 1] = px
     return map, px
+end
+
+-- Measure the actual rendered width of a line using mpv's compute_bounds.
+-- Returns {x0, x1, width} or nil if unavailable.
+-- Uses \an2 centered positioning to match actual rendering, but strips
+-- border/shadow so we get pure text advance width.
+local MEASURE_OSD_ID = 99
+local function measure_line_bounds(text, font_size)
+    local key = text .. '@@' .. font_size .. '@@' .. osd_w .. '@@' .. osd_h
+    if bounds_cache[key] then return bounds_cache[key] end
+
+    local sub_x = math.floor(osd_w / 2)
+    local styled = '{\\an2\\pos(' .. sub_x .. ',360)\\fn' .. FONT_FAMILY
+                 .. '\\fsp0\\bord0\\shad0\\fs' .. font_size .. '}' .. esc(text)
+
+    local ok, res = pcall(mp.command_native, {
+        name = 'osd-overlay',
+        id = MEASURE_OSD_ID,
+        format = 'ass-events',
+        data = styled,
+        res_x = osd_w,
+        res_y = osd_h,
+        compute_bounds = true,
+    })
+    -- Remove measurement overlay immediately (never displayed)
+    pcall(mp.command_native, {
+        name = 'osd-overlay',
+        id = MEASURE_OSD_ID,
+        format = 'none',
+        data = '',
+    })
+
+    if ok and res and type(res) == 'table' and res.x0 and res.x1 then
+        local result = { x0 = res.x0, x1 = res.x1, width = res.x1 - res.x0 }
+        bounds_cache[key] = result
+        dlog('[measure_line_bounds] "' .. text:sub(1, 20) .. '…" → x0='
+             .. string.format('%.1f', result.x0) .. ' x1='
+             .. string.format('%.1f', result.x1) .. ' width='
+             .. string.format('%.1f', result.width))
+        return result
+    end
+    dlog('[measure_line_bounds] compute_bounds unavailable or failed')
+    return nil
 end
 
 local function utf8_len(s)
@@ -826,13 +873,30 @@ local function render_subtitles()
         local lbs = ln.byte_start
         local lbe = lbs + #ln.text
 
-        local px_map, total_px = build_px_map(ln.text, lbs)
-        local line_left = osd_w / 2 - total_px / 2
+        local px_map, raw_total = build_px_map(ln.text, lbs)
+
+        -- Use compute_bounds to get ACTUAL rendered width from libass.
+        -- This gives us the exact line_left and a calibration scale so our
+        -- font-metric positions match the real rendering.
+        local bounds = measure_line_bounds(ln.text, SUB_CONF.font_size)
+        local actual_total, actual_x0, cal_scale
+        if bounds and raw_total > 0 then
+            actual_total = bounds.width
+            actual_x0    = bounds.x0
+            cal_scale    = actual_total / raw_total
+        else
+            actual_total = raw_total
+            actual_x0    = osd_w / 2 - raw_total / 2
+            cal_scale    = 1.0
+        end
 
         -- Store per-line hit data for byte-offset-based hover detection
         subtitle_line_data[#subtitle_line_data+1] = {
             y1 = y1, y2 = y2,
-            total_px = total_px,
+            actual_total = actual_total,
+            actual_x0    = actual_x0,
+            raw_total    = raw_total,
+            cal_scale    = cal_scale,
             text = ln.text,
             byte_start = lbs,
             byte_end = lbe,
@@ -858,13 +922,13 @@ local function render_subtitles()
         for _, tok in ipairs(line_toks) do
             local ls = tok.start - lbs
             local le = tok['end'] - lbs
-            local px0 = px_map[ls + 1] or 0
-            local px1 = px_map[le + 1] or total_px
+            local px0 = (px_map[ls + 1] or 0) * cal_scale
+            local px1 = (px_map[le + 1] or raw_total) * cal_scale
             local raw_w = px1 - px0
             local pad_x = (raw_w < 30) and math.floor((30 - raw_w) / 2) or 0
             subtitle_regions[#subtitle_regions+1] = {
-                x1    = line_left + px0 - pad_x - BORD_W,
-                x2    = line_left + px1 + pad_x + BORD_W,
+                x1    = actual_x0 + px0 - pad_x - BORD_W,
+                x2    = actual_x0 + px1 + pad_x + BORD_W,
                 y1    = y1,
                 y2    = y2,
                 token = tok,
@@ -1542,27 +1606,29 @@ end
 
 local function find_hovered_token(mx, my)
     -- Primary: byte-offset mapping — map mouse position directly to a text
-    -- byte offset, then find which token contains it.  This approach is
-    -- resilient to centering mismatch because it uses proportional position
-    -- within the line rather than absolute pixel coordinates.
+    -- byte offset, then find which token contains it.
+    -- Uses compute_bounds calibration: actual_x0 gives the exact left edge,
+    -- cal_scale converts screen-space offsets to raw font-metric space.
     for _, ld in ipairs(subtitle_line_data) do
         if my >= ld.y1 and my <= ld.y2 then
-            local line_center = osd_w / 2
-            local half_width  = ld.total_px / 2
-            local line_left   = line_center - half_width
+            local line_left   = ld.actual_x0 or (osd_w / 2 - (ld.actual_total or ld.raw_total or 0) / 2)
+            local line_width  = ld.actual_total or ld.raw_total or 0
+            local cal         = ld.cal_scale or 1.0
 
-            -- How far is the mouse from the estimated line start?
+            -- Mouse offset from line start (screen space)
             local px_offset = mx - line_left
             -- Allow some leeway outside the line bounds (border + tolerance)
-            if px_offset < -(BORD_W + 10) or px_offset > ld.total_px + BORD_W + 10 then
+            if px_offset < -(BORD_W + 10) or px_offset > line_width + BORD_W + 10 then
                 -- Try next line (multi-line subtitles)
-                -- but don't break — continue checking other lines
             else
                 -- Clamp to valid range
-                px_offset = math.max(0, math.min(px_offset, ld.total_px))
+                px_offset = math.max(0, math.min(px_offset, line_width))
+
+                -- Convert screen-space offset to raw font-metric space
+                local raw_px = (cal > 0) and (px_offset / cal) or px_offset
 
                 -- Find which byte in this line the mouse is over
-                local line_byte = px_to_byte_in_line(ld.text, px_offset, ld.byte_start)
+                local line_byte = px_to_byte_in_line(ld.text, raw_px, ld.byte_start)
                 -- Convert to global byte offset (0-indexed, matching token offsets)
                 local global_byte = ld.byte_start + line_byte - 1
 
@@ -1808,6 +1874,7 @@ local function on_subtitle_change(_, new_text)
     cached_sub_token_id = nil
     cached_sub_regions  = nil
     cached_sub_line_data = nil
+    bounds_cache        = {}
     kanji_extract_cache = {}
     last_popup_render_key = nil
     render_popup()
@@ -2163,6 +2230,7 @@ local function debounced_resize_render()
         cached_sub_token_id = nil
         cached_sub_regions = nil
         cached_sub_line_data = nil
+        bounds_cache = {}
         last_popup_render_key = nil
         render_subtitles()
         render_popup()
