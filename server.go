@@ -26,6 +26,11 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/sfnt"
+	"golang.org/x/image/math/fixed"
 )
 
 // ─── MPV instance counter ─────────────────────────────────────────────────────
@@ -613,6 +618,106 @@ func jpdbScrape(ctx context.Context, method, urlPath, formBody, cookie string) (
 	return bodyStr, setCookie, nil
 }
 
+// ─── Font metrics for pixel-accurate hit detection ────────────────────────────
+
+var (
+	metricsFont     *sfnt.Font
+	metricsFontErr  error
+	metricsFontOnce sync.Once
+)
+
+// loadMetricsFont tries common Windows font paths for Yu Gothic UI.
+// Falls back gracefully — if no font is found, /parse responses omit px_map
+// and the Lua side uses its estimated width model.
+func loadMetricsFont() {
+	fontPaths := []string{
+		filepath.Join(os.Getenv("WINDIR"), "Fonts", "YuGothR.ttc"),
+		filepath.Join(os.Getenv("WINDIR"), "Fonts", "YuGothM.ttc"),
+		filepath.Join(os.Getenv("WINDIR"), "Fonts", "YuGothB.ttc"),
+		filepath.Join(os.Getenv("WINDIR"), "Fonts", "yugothic.ttf"),
+		filepath.Join(os.Getenv("WINDIR"), "Fonts", "msgothic.ttc"),
+		`C:\Windows\Fonts\YuGothR.ttc`,
+		`C:\Windows\Fonts\YuGothM.ttc`,
+		`C:\Windows\Fonts\YuGothB.ttc`,
+	}
+
+	for _, p := range fontPaths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+
+		// Try as TrueType Collection first
+		col, err := sfnt.ParseCollection(data)
+		if err == nil {
+			f, err := col.Font(0)
+			if err == nil {
+				metricsFont = f
+				logger.Log("FONT loaded: %s (collection)", p)
+				return
+			}
+		}
+
+		// Try as single font
+		f, err := sfnt.Parse(data)
+		if err == nil {
+			metricsFont = f
+			logger.Log("FONT loaded: %s", p)
+			return
+		}
+	}
+
+	metricsFontErr = fmt.Errorf("could not load any Japanese font for metrics")
+	logger.Log("FONT WARNING: %v — hover will use estimated widths", metricsFontErr)
+}
+
+// computePixelMap returns a byte-indexed (1-based) cumulative pixel map
+// for the given text at the given font size.  Each entry is [bytePos, px].
+// Returns nil if font is not available.
+func computePixelMap(text string, fontSize float64) [][]float64 {
+	metricsFontOnce.Do(loadMetricsFont)
+	if metricsFont == nil {
+		return nil
+	}
+
+	var buf sfnt.Buffer
+	ppem := fixed.Int26_6(fontSize * 64) // 26.6 fixed point
+
+	result := make([][]float64, 0, utf8.RuneCountInString(text)+1)
+	cumPx := 0.0
+	byteIdx := 0
+
+	for _, r := range text {
+		result = append(result, []float64{float64(byteIdx + 1), cumPx})
+
+		idx, err := metricsFont.GlyphIndex(&buf, r)
+		if err != nil || idx == 0 {
+			// Glyph not in font — estimate based on Unicode range
+			if r >= 0x3000 {
+				cumPx += fontSize
+			} else if r >= 0x80 {
+				cumPx += fontSize * 0.5
+			} else {
+				cumPx += fontSize * 0.5
+			}
+		} else {
+			adv, err := metricsFont.GlyphAdvance(&buf, idx, ppem, font.HintingNone)
+			if err != nil {
+				cumPx += fontSize
+			} else {
+				cumPx += float64(adv) / 64.0
+			}
+		}
+
+		byteIdx += utf8.RuneLen(r)
+	}
+
+	// Sentinel: end of text
+	result = append(result, []float64{float64(byteIdx + 1), cumPx})
+
+	return result
+}
+
 // ─── Parse handler ────────────────────────────────────────────────────────────
 
 var (
@@ -627,14 +732,20 @@ var (
 func handleParse(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
-		Text string `json:"text"`
+		Text     string  `json:"text"`
+		FontSize float64 `json:"font_size"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Text == "" {
 		sendError(w, 400, "text is required")
 		return
 	}
+	if body.FontSize <= 0 {
+		body.FontSize = 60 // default
+	}
 
-	if cached, ok := parseCache.Get(body.Text); ok {
+	// Cache key includes font_size for pixel map accuracy
+	cacheKey := fmt.Sprintf("%s@@%.0f", body.Text, body.FontSize)
+	if cached, ok := parseCache.Get(cacheKey); ok {
 		logger.Log("PARSE cache hit: %q", truncate(body.Text, 40))
 		sendRaw(w, 200, cached)
 		return
@@ -756,9 +867,17 @@ func handleParse(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	result, _ := json.Marshal(map[string]any{"tokens": tokens, "cards": cards})
-	parseCache.Set(body.Text, result)
-	logger.Log("PARSE ok: %d tokens, %d cards", len(tokens), len(cards))
+	// Compute pixel-accurate character width map using actual font metrics
+	pxMap := computePixelMap(body.Text, body.FontSize)
+
+	responseData := map[string]any{"tokens": tokens, "cards": cards}
+	if pxMap != nil {
+		responseData["px_map"] = pxMap
+	}
+
+	result, _ := json.Marshal(responseData)
+	parseCache.Set(cacheKey, result)
+	logger.Log("PARSE ok: %d tokens, %d cards, px_map=%v", len(tokens), len(cards), pxMap != nil)
 	sendRaw(w, 200, result)
 }
 

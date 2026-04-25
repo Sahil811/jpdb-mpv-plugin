@@ -253,6 +253,7 @@ local STATE_LABELS = conf.STATE_LABELS
 
 local current_tokens    = {}
 local current_text      = ''
+local current_px_map    = nil  -- server-measured byte→pixel map (from font metrics)
 local last_parsed_text  = nil
 local hovered_token     = nil
 local hover_x           = 0
@@ -406,7 +407,42 @@ end
 -- Build byte→pixel cumulative map for one line of text.
 -- map[k] = px offset of the character whose first byte is at 1-indexed position k.
 -- map[#text+1] = total pixel width (sentinel).
-local function build_px_map(text)
+--
+-- If server-measured px_map is available (from font metrics), uses it for
+-- pixel-accurate widths. Falls back to estimated char_px() model otherwise.
+local function build_px_map(text, line_byte_start)
+    -- Try server-measured pixel map first (line_byte_start is 0-indexed global offset)
+    if current_px_map and line_byte_start then
+        local map = {}
+        local len = #text
+        -- Look up each character's global byte position in the server map
+        local first_px = nil
+        local i = 1
+        while i <= len do
+            local global_byte = line_byte_start + i  -- 1-indexed in server map
+            local px_val = current_px_map[global_byte]
+            if px_val then
+                if not first_px then first_px = px_val end
+                map[i] = px_val - first_px
+            end
+            -- Advance to next character
+            local b = text:byte(i)
+            if     b < 0x80 then i = i + 1
+            elseif b < 0xE0 then i = i + 2
+            elseif b < 0xF0 then i = i + 3
+            else                 i = i + 4 end
+        end
+        -- Sentinel
+        local end_byte = line_byte_start + len + 1
+        local end_px = current_px_map[end_byte]
+        if first_px and end_px then
+            map[len + 1] = end_px - first_px
+            return map, end_px - first_px
+        end
+        -- Fall through to estimated model if server map was incomplete
+    end
+
+    -- Fallback: estimated character width model
     local map = {}
     local i, px = 1, 0
     local len = #text
@@ -784,10 +820,11 @@ local function render_subtitles()
         local y1 = line_bottom - math.floor(SUB_CONF.font_size * ascent) - BORD_W - vpad
         local y2 = line_bottom + math.floor(SUB_CONF.font_size * descent) + BORD_W + vpad
 
-        local px_map, total_px = build_px_map(ln.text)
-        local line_left = osd_w / 2 - total_px / 2
         local lbs = ln.byte_start
         local lbe = lbs + #ln.text
+
+        local px_map, total_px = build_px_map(ln.text, lbs)
+        local line_left = osd_w / 2 - total_px / 2
 
         -- Store per-line hit data for byte-offset-based hover detection
         subtitle_line_data[#subtitle_line_data+1] = {
@@ -1444,9 +1481,44 @@ end
 -- ─── Hit testing──────────────────────────────────────────────────────────────
 
 -- Map a pixel offset (relative to line start) to a byte offset within the line.
--- Walks the line text character-by-character; returns the byte position of the
--- character whose center is closest to px_target.
-local function px_to_byte_in_line(text, px_target)
+-- Uses server-provided px_map (font metrics) when available for pixel-accurate
+-- mapping, falls back to estimated char_px() model otherwise.
+local function px_to_byte_in_line(text, px_target, line_byte_start)
+    -- Try server-provided font metrics first
+    if current_px_map and line_byte_start then
+        local len = #text
+        local first_px = current_px_map[line_byte_start + 1]
+        if first_px then
+            local best_byte, best_dist = 1, math.huge
+            local i = 1
+            while i <= len do
+                local global_byte = line_byte_start + i
+                local px_val = current_px_map[global_byte]
+                -- Get next character position for center calculation
+                local b = text:byte(i)
+                local ni
+                if     b < 0x80 then ni = i + 1
+                elseif b < 0xE0 then ni = i + 2
+                elseif b < 0xF0 then ni = i + 3
+                else                 ni = i + 4 end
+                local next_px = current_px_map[line_byte_start + ni] or current_px_map[line_byte_start + len + 1]
+                if px_val and next_px then
+                    local char_left = px_val - first_px
+                    local char_right = next_px - first_px
+                    local char_center = (char_left + char_right) / 2
+                    local dist = math.abs(char_center - px_target)
+                    if dist < best_dist then
+                        best_dist = dist
+                        best_byte = i
+                    end
+                end
+                i = ni
+            end
+            return best_byte
+        end
+    end
+
+    -- Fallback: estimated character widths
     local i, px = 1, 0
     local len = #text
     local best_byte, best_dist = 1, math.huge
@@ -1486,7 +1558,7 @@ local function find_hovered_token(mx, my)
                 px_offset = math.max(0, math.min(px_offset, ld.total_px))
 
                 -- Find which byte in this line the mouse is over
-                local line_byte = px_to_byte_in_line(ld.text, px_offset)
+                local line_byte = px_to_byte_in_line(ld.text, px_offset, ld.byte_start)
                 -- Convert to global byte offset (0-indexed, matching token offsets)
                 local global_byte = ld.byte_start + line_byte - 1
 
@@ -1556,17 +1628,34 @@ local function find_hovered_button(mx, my)
 end
 
 
+-- Extract server-measured pixel map from parse response.
+-- The px_map comes as an array of [byte_pos, cumulative_px] pairs.
+-- We convert it to a Lua table keyed by byte_pos for O(1) lookup.
+local function extract_px_map(res)
+    if not res or not res.px_map then return nil end
+    local map = {}
+    for _, entry in ipairs(res.px_map) do
+        local byte_pos = math.floor(entry[1])
+        local px_val   = entry[2]
+        map[byte_pos] = px_val
+    end
+    return map
+end
+
 -- ─── Actions ──────────────────────────────────────────────────────────────────
 
 local function refresh_after_action()
     dlog('[refresh_after_action] Starting refresh...')
-    http_request_async('POST', '/parse', { text = current_text }, function(res, err)
+    http_request_async('POST', '/parse',
+        { text = current_text, font_size = SUB_CONF.font_size },
+        function(res, err)
         if err or not (res and res.tokens) then 
             dlog('[refresh_after_action] Error or no tokens')
             return 
         end
         dlog('[refresh_after_action] Got ' .. #res.tokens .. ' tokens')
         current_tokens      = res.tokens
+        current_px_map      = extract_px_map(res)
         cached_sub_ass      = nil
         cached_sub_token_id = nil
         cached_sub_regions  = nil
@@ -1712,7 +1801,7 @@ local function on_subtitle_change(_, new_text)
     render_popup()
 
     if not new_text or new_text == '' then
-        current_text = ''; current_tokens = {}
+        current_text = ''; current_tokens = {}; current_px_map = nil
         render_subtitles(); return
     end
 
@@ -1721,10 +1810,13 @@ local function on_subtitle_change(_, new_text)
     parse_timer = mp.add_timeout(0.08, function()
         parse_timer = nil
         if current_text ~= new_text then return end
-        http_request_async('POST', '/parse', { text = new_text }, function(res, err)
+        http_request_async('POST', '/parse',
+            { text = new_text, font_size = SUB_CONF.font_size },
+            function(res, err)
             if current_text ~= new_text or err then return end
             if res and res.tokens then
                 current_tokens      = res.tokens
+                current_px_map      = extract_px_map(res)
                 cached_sub_ass      = nil
                 cached_sub_token_id = nil
                 cached_sub_regions  = nil
