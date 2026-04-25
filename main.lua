@@ -410,11 +410,14 @@ end
 --
 -- If server-measured px_map is available (from font metrics), uses it for
 -- pixel-accurate widths. Falls back to estimated char_px() model otherwise.
+-- width_scale adjusts for any systematic difference between our font metrics
+-- and libass's actual rendering.
 local function build_px_map(text, line_byte_start)
     -- Try server-measured pixel map first (line_byte_start is 0-indexed global offset)
     if current_px_map and line_byte_start then
         local map = {}
         local len = #text
+        local ws = SUB_CONF.width_scale or 1.0
         -- Look up each character's global byte position in the server map
         local first_px = nil
         local i = 1
@@ -423,7 +426,7 @@ local function build_px_map(text, line_byte_start)
             local px_val = current_px_map[global_byte]
             if px_val then
                 if not first_px then first_px = px_val end
-                map[i] = px_val - first_px
+                map[i] = (px_val - first_px) * ws
             end
             -- Advance to next character
             local b = text:byte(i)
@@ -436,8 +439,9 @@ local function build_px_map(text, line_byte_start)
         local end_byte = line_byte_start + len + 1
         local end_px = current_px_map[end_byte]
         if first_px and end_px then
-            map[len + 1] = end_px - first_px
-            return map, end_px - first_px
+            local total = (end_px - first_px) * ws
+            map[len + 1] = total
+            return map, total
         end
         -- Fall through to estimated model if server map was incomplete
     end
@@ -802,11 +806,11 @@ local function render_subtitles()
     end
 
     local layout = subtitle_layout()
+    local sub_x  = math.floor(osd_w / 2)
     -- ASS tag: explicit font + zero letter spacing for predictable glyph widths
     local tag_prefix = '\\fn' .. FONT_FAMILY .. '\\fsp0\\bord2\\shad1\\b0'
 
-    -- Per-line data for \an1 rendering
-    local line_render_data = {}
+    local line_parts = {}
 
     for li, ln in ipairs(layout.lines) do
         local from_bottom = layout.n - li
@@ -837,11 +841,7 @@ local function render_subtitles()
         -- Build ASS for this line
         local line_ass = build_line_subtitle_ass(current_tokens, current_text, lbs, lbe)
         if line_ass then
-            line_render_data[#line_render_data+1] = {
-                x = math.floor(line_left),
-                y = math.floor(line_bottom),
-                ass = line_ass,
-            }
+            line_parts[#line_parts+1] = line_ass
         end
 
         -- Build pixel-based hit regions (used for popup placement)
@@ -873,15 +873,13 @@ local function render_subtitles()
         end
     end
 
-    -- Per-line \an1 events: both rendering and hit detection use our width model,
-    -- eliminating centering mismatch. Requires accurate font metrics (px_map).
+    -- \an2 rendering: libass handles centering using actual font metrics.
+    -- Hit detection uses our px_map (server font metrics) for byte mapping.
     local a = assdraw.ass_new()
-    for _, ev in ipairs(line_render_data) do
-        a:new_event()
-        a:append('{\\an1\\pos(' .. ev.x .. ',' .. ev.y .. ')\\fs'
-              .. SUB_CONF.font_size .. tag_prefix .. '}')
-        a:append(ev.ass)
-    end
+    a:new_event()
+    a:append('{\\an2\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')\\fs'
+          .. SUB_CONF.font_size .. tag_prefix .. '}')
+    a:append(table.concat(line_parts, '\\N'))
 
     -- Debug: visualize hit regions as semi-transparent rectangles
     if conf.DEBUG_LOG then

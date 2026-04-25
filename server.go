@@ -765,9 +765,12 @@ func computePixelMap(text string, fontSize float64) [][]float64 {
 	// Sentinel: end of text
 	result = append(result, []float64{float64(byteIdx + 1), cumPx})
 
+	charCount := utf8.RuneCountInString(text)
 	if fallbackCount > 0 {
-		logger.Log("FONT px_map: %d chars, %d glyph fallbacks, total=%.1fpx", utf8.RuneCountInString(text), fallbackCount, cumPx)
+		logger.Log("FONT px_map: %d chars, %d glyph fallbacks, total=%.1fpx", charCount, fallbackCount, cumPx)
 	}
+	// Log first computation for diagnostics
+	logger.Log("FONT px_map: %d chars, total=%.1fpx, avg=%.2fpx/char (fontSize=%.0f)", charCount, cumPx, cumPx/float64(charCount), fontSize)
 
 	return result
 }
