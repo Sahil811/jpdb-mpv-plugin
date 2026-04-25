@@ -572,6 +572,10 @@ func jpdbAPI(ctx context.Context, endpoint string, body any) (json.RawMessage, e
 // ─── JPDB scrape request ──────────────────────────────────────────────────────
 
 func jpdbScrape(ctx context.Context, method, urlPath, formBody, cookie string) (string, string, error) {
+	// Enforce a timeout to prevent hanging if jpdb.io is unresponsive
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
 	if err := scrapeLimiter.Wait(ctx); err != nil {
 		return "", "", err
 	}
@@ -1398,12 +1402,17 @@ func handleWordAudio(w http.ResponseWriter, r *http.Request) {
 		audioBytes[3] ^= 0x0f
 	}
 
-	// Cache the decoded audio
-	if len(audioCache) < 50 {
-		audioCacheMu.Lock()
-		audioCache[vid] = &audioCacheEntry{data: audioBytes, contentType: "audio/ogg"}
-		audioCacheMu.Unlock()
+	// Cache the decoded audio (LRU eviction at 50 entries)
+	audioCacheMu.Lock()
+	if len(audioCache) >= 50 {
+		// Evict a random entry (cheap approximation of LRU)
+		for k := range audioCache {
+			delete(audioCache, k)
+			break
+		}
 	}
+	audioCache[vid] = &audioCacheEntry{data: audioBytes, contentType: "audio/ogg"}
+	audioCacheMu.Unlock()
 
 	w.Header().Set("Content-Type", "audio/ogg")
 	w.Header().Set("Cache-Control", "public, max-age=31536000") // 1 year

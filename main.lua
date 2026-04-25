@@ -89,7 +89,6 @@ local function stem_word(w)
         {'sion$',    3}, -- explosion → explo... (keep)
         {'ness$',    4}, -- darkness → dark
         {'ment$',    4}, -- judgement → judge
-        {'ment$',    4}, -- equipment → equip
         {'able$',    4}, -- comfortable → comfort
         {'ible$',    4}, -- terrible → terr
         {'ting$',    3}, -- meeting → meet
@@ -219,6 +218,9 @@ local function launch_server_then_register()
     local attempts = 0
     local function poll()
         attempts = attempts + 1
+        if attempts == 7 then
+            mp.osd_message('[jpdb] Waiting for server…', 3)
+        end
         server_ping(function(up)
             if up then
                 dlog('[jpdb] Server is up after ' .. attempts .. ' poll(s)')
@@ -1108,13 +1110,13 @@ render_popup = function()
 
     popup_buttons = {}
 
-    local render_key = string.format('%s:%s:%s:%s:%s:%s',
-        tostring(popup_token and popup_token.card and popup_token.card.vid),
-        tostring(popup_token and popup_token.card and popup_token.card.sid),
-        tostring(hovered_button),
-        tostring(popup_toast_text),
-        tostring(popup_rect and popup_rect.x1),
-        tostring(conf.get_theme_name()))
+    local render_key = string.format('%s::%s::%s::%s::%s::%s',
+        tostring(popup_token and popup_token.card and popup_token.card.vid or 'nil'),
+        tostring(popup_token and popup_token.card and popup_token.card.sid or 'nil'),
+        tostring(hovered_button or 'none'),
+        tostring(popup_toast_text or 'none'),
+        tostring(popup_rect and popup_rect.x1 or 'nil'),
+        tostring(conf.get_theme_name() or 'default'))
     if render_key == last_popup_render_key then return end
 
     local card    = popup_token.card
@@ -1753,12 +1755,18 @@ end
 
 local function refresh_after_action()
     dlog('[refresh_after_action] Starting refresh...')
+    local saved_token = popup_token  -- snapshot to detect stale callback
     http_request_async('POST', '/parse',
         { text = current_text, font_size = SUB_CONF.font_size },
         function(res, err)
         if err or not (res and res.tokens) then 
             dlog('[refresh_after_action] Error or no tokens')
             return 
+        end
+        -- Guard: popup may have been closed while request was in-flight
+        if not popup_token or popup_token ~= saved_token then
+            dlog('[refresh_after_action] Popup changed/closed during request, skip')
+            return
         end
         dlog('[refresh_after_action] Got ' .. #res.tokens .. ' tokens')
         current_tokens      = res.tokens
@@ -1784,11 +1792,17 @@ local function refresh_after_action()
     end)
 end
 
+-- Action debounce: prevent duplicate API requests from rapid clicks
+local action_in_flight = false
+
 local function do_review(card, rating)
+    if action_in_flight then return end
+    action_in_flight = true
     show_popup_toast('Reviewing…', true)
     http_request_async('POST', '/review',
         { vid=card.vid, sid=card.sid, rating=rating },
         function(_, err)
+            action_in_flight = false
             if err then show_popup_toast('✕ Review failed', false)
             else show_popup_toast('✓ Reviewed: ' .. rating, true)
                  mp.add_timeout(1.5, refresh_after_action) end
@@ -1796,10 +1810,13 @@ local function do_review(card, rating)
 end
 
 local function do_mine(card, sentence)
+    if action_in_flight then return end
+    action_in_flight = true
     show_popup_toast('Adding to deck…', true)
     http_request_async('POST', '/mine',
         { vid=card.vid, sid=card.sid, sentence=sentence or current_text },
         function(_, err)
+            action_in_flight = false
             if err then show_popup_toast('✕ Add failed', false)
             else show_popup_toast('✓ Added: ' .. card.spelling, true)
                  mp.add_timeout(1.5, refresh_after_action) end
@@ -1807,11 +1824,14 @@ local function do_mine(card, sentence)
 end
 
 local function do_set_flag(card, flag, state)
+    if action_in_flight then return end
+    action_in_flight = true
     local verb = state and 'Setting' or 'Removing'
     show_popup_toast(verb .. ' ' .. flag .. '…', true)
     http_request_async('POST', '/set-flag',
         { vid=card.vid, sid=card.sid, flag=flag, state=state },
         function(_, err)
+            action_in_flight = false
             if err then show_popup_toast('✕ Flag failed', false)
             else
                 local done = state and '✓ Added ' or '✓ Removed '
@@ -2321,6 +2341,13 @@ mp.observe_property('osd-dimensions', 'native', function(_, dim)
 end)
 
 mp.register_event('shutdown', function()
+    -- Kill all active timers to prevent accessing freed state
+    if hover_debounce_timer then hover_debounce_timer:kill(); hover_debounce_timer = nil end
+    if parse_timer then parse_timer:kill(); parse_timer = nil end
+    if popup_toast_timer then popup_toast_timer:kill(); popup_toast_timer = nil end
+    if mouse_timer then mouse_timer:kill(); mouse_timer = nil end
+    if resize_timer then resize_timer:kill(); resize_timer = nil end
+    if server_health_timer then server_health_timer:kill(); server_health_timer = nil end
     -- Unregister this MPV instance; server shuts itself down when count → 0
     mp.command_native({
         name='subprocess',
