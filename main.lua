@@ -258,6 +258,7 @@ local hovered_token     = nil
 local hover_x           = 0
 local hover_y           = 0
 local subtitle_regions  = {}
+local subtitle_line_data = {}  -- per-line data for byte-offset hit detection
 local jpdb_did_pause    = false
 local popup_visible     = false
 local popup_token       = nil
@@ -295,6 +296,7 @@ end
 local cached_sub_ass      = nil
 local cached_sub_token_id = nil
 local cached_sub_regions  = nil
+local cached_sub_line_data = nil
 local kanji_extract_cache = {}
 local last_popup_render_key = nil
 
@@ -740,6 +742,7 @@ end
 local function render_subtitles()
     if not sub_osd then return end
     subtitle_regions = {}
+    subtitle_line_data = {}
 
     dlog('[render_subtitles] tokens=' .. #current_tokens .. ' hovered=' .. tostring(hovered_token ~= nil))
 
@@ -751,9 +754,10 @@ local function render_subtitles()
     -- Cache key includes osd_w because line_left depends on it
     local tok_id = #current_tokens .. ':' .. tostring(hovered_token) .. ':' .. osd_w
 
-    -- Fast path: if nothing changed, restore cached ASS + hit regions
+    -- Fast path: if nothing changed, restore cached ASS + hit data
     if cached_sub_token_id == tok_id and cached_sub_ass and cached_sub_regions then
         subtitle_regions = cached_sub_regions
+        subtitle_line_data = cached_sub_line_data or {}
         if sub_osd.data ~= cached_sub_ass then
             sub_osd.data = cached_sub_ass
             sub_osd:update()
@@ -762,11 +766,12 @@ local function render_subtitles()
     end
 
     local layout = subtitle_layout()
-    -- ASS tag prefix: explicit font, zero letter spacing, no smart wrapping
-    local tag_prefix = '\\fn' .. FONT_FAMILY .. '\\fs' .. SUB_CONF.font_size
-                    .. '\\fsp0\\fscx100\\fscy100\\bord2\\shad1\\b0'
+    local sub_x  = math.floor(osd_w / 2)
+    -- ASS tag: explicit font + zero letter spacing for predictable glyph widths
+    local tag_prefix = '\\fn' .. FONT_FAMILY .. '\\fsp0\\bord2\\shad1\\b0'
 
-    local a = assdraw.ass_new()
+    -- Build per-line ASS content (joined with \\N for \an2 centering)
+    local line_parts = {}
 
     for li, ln in ipairs(layout.lines) do
         local from_bottom = layout.n - li
@@ -780,21 +785,26 @@ local function render_subtitles()
         local y2 = line_bottom + math.floor(SUB_CONF.font_size * descent) + BORD_W + vpad
 
         local px_map, total_px = build_px_map(ln.text)
-        -- Use float for precise centering; \an1 bottom-left anchors at our computed edge
         local line_left = osd_w / 2 - total_px / 2
         local lbs = ln.byte_start
         local lbe = lbs + #ln.text
 
-        -- Per-line ASS event with \an1 (bottom-left): WE control left edge position,
-        -- eliminating the centering mismatch between our width model and ASS renderer.
+        -- Store per-line hit data for byte-offset-based hover detection
+        subtitle_line_data[#subtitle_line_data+1] = {
+            y1 = y1, y2 = y2,
+            total_px = total_px,
+            text = ln.text,
+            byte_start = lbs,
+            byte_end = lbe,
+        }
+
+        -- Build ASS for this line
         local line_ass = build_line_subtitle_ass(current_tokens, current_text, lbs, lbe)
-        if line_ass and #line_ass > 0 then
-            a:new_event()
-            a:append('{\\an1\\pos(' .. line_left .. ',' .. line_bottom .. ')' .. tag_prefix .. '}')
-            a:append(line_ass)
+        if line_ass then
+            line_parts[#line_parts+1] = line_ass
         end
 
-        -- Build hit regions sorted by span length (shorter = higher priority)
+        -- Build pixel-based hit regions (used for popup placement)
         local line_toks = {}
         for _, tok in ipairs(current_tokens) do
             if tok.start >= lbs and tok['end'] <= lbe then
@@ -806,11 +816,10 @@ local function render_subtitles()
         end)
 
         for _, tok in ipairs(line_toks) do
-            local ls = tok.start - lbs   -- 0-indexed in line
-            local le = tok['end'] - lbs  -- 0-indexed
+            local ls = tok.start - lbs
+            local le = tok['end'] - lbs
             local px0 = px_map[ls + 1] or 0
             local px1 = px_map[le + 1] or total_px
-            -- Expand narrow tokens (< 30px wide) so single-kana particles are easier to target
             local raw_w = px1 - px0
             local pad_x = (raw_w < 30) and math.floor((30 - raw_w) / 2) or 0
             subtitle_regions[#subtitle_regions+1] = {
@@ -823,6 +832,13 @@ local function render_subtitles()
             }
         end
     end
+
+    -- Single \an2 event: ASS handles centering using actual font metrics
+    local a = assdraw.ass_new()
+    a:new_event()
+    a:append('{\\an2\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')\\fs'
+          .. SUB_CONF.font_size .. tag_prefix .. '}')
+    a:append(table.concat(line_parts, '\\N'))
 
     -- Debug: visualize hit regions as semi-transparent rectangles
     if conf.DEBUG_LOG then
@@ -841,9 +857,10 @@ local function render_subtitles()
         sub_osd.data = new_data
         sub_osd:update()
     end
-    cached_sub_ass      = new_data
-    cached_sub_token_id = tok_id
-    cached_sub_regions  = subtitle_regions
+    cached_sub_ass       = new_data
+    cached_sub_token_id  = tok_id
+    cached_sub_regions   = subtitle_regions
+    cached_sub_line_data = subtitle_line_data
 end
 
 
@@ -1426,65 +1443,108 @@ end
 
 -- ─── Hit testing──────────────────────────────────────────────────────────────
 
+-- Map a pixel offset (relative to line start) to a byte offset within the line.
+-- Walks the line text character-by-character; returns the byte position of the
+-- character whose center is closest to px_target.
+local function px_to_byte_in_line(text, px_target)
+    local i, px = 1, 0
+    local len = #text
+    local best_byte, best_dist = 1, math.huge
+    while i <= len do
+        local cw, ni = char_px(text, i)
+        local char_center = px + cw / 2
+        local dist = math.abs(char_center - px_target)
+        if dist < best_dist then
+            best_dist = dist
+            best_byte = i
+        end
+        px = px + cw
+        i = ni
+    end
+    return best_byte
+end
+
 local function find_hovered_token(mx, my)
-    -- Pass 1: exact hit; prefer shorter spans, then closer center
-    local best, best_span, best_cdist = nil, math.huge, math.huge
-    for _, r in ipairs(subtitle_regions) do
-        if my >= r.y1 and my <= r.y2 and mx >= r.x1 and mx <= r.x2 then
-            local center_x = (r.x1 + r.x2) / 2
-            local cdist = math.abs(mx - center_x)
-            if r.span < best_span or (r.span == best_span and cdist < best_cdist) then
-                best = r.token; best_span = r.span; best_cdist = cdist
+    -- Primary: byte-offset mapping — map mouse position directly to a text
+    -- byte offset, then find which token contains it.  This approach is
+    -- resilient to centering mismatch because it uses proportional position
+    -- within the line rather than absolute pixel coordinates.
+    for _, ld in ipairs(subtitle_line_data) do
+        if my >= ld.y1 and my <= ld.y2 then
+            local line_center = osd_w / 2
+            local half_width  = ld.total_px / 2
+            local line_left   = line_center - half_width
+
+            -- How far is the mouse from the estimated line start?
+            local px_offset = mx - line_left
+            -- Allow some leeway outside the line bounds (border + tolerance)
+            if px_offset < -(BORD_W + 10) or px_offset > ld.total_px + BORD_W + 10 then
+                -- Try next line (multi-line subtitles)
+                -- but don't break — continue checking other lines
+            else
+                -- Clamp to valid range
+                px_offset = math.max(0, math.min(px_offset, ld.total_px))
+
+                -- Find which byte in this line the mouse is over
+                local line_byte = px_to_byte_in_line(ld.text, px_offset)
+                -- Convert to global byte offset (0-indexed, matching token offsets)
+                local global_byte = ld.byte_start + line_byte - 1
+
+                -- Find containing token; prefer shortest span on overlap
+                local best, best_span = nil, math.huge
+                for _, tok in ipairs(current_tokens) do
+                    if global_byte >= tok.start and global_byte < tok['end'] then
+                        local span = tok['end'] - tok.start
+                        if span < best_span then
+                            best = tok; best_span = span
+                        end
+                    end
+                end
+                if best then return best end
+
+                -- Mouse is in a gap — find nearest token on this line by byte distance
+                local best_near, best_dist = nil, math.huge
+                for _, tok in ipairs(current_tokens) do
+                    if tok.start >= ld.byte_start and tok['end'] <= ld.byte_end then
+                        -- Distance to nearest edge of token
+                        local dist
+                        if global_byte < tok.start then
+                            dist = tok.start - global_byte
+                        elseif global_byte >= tok['end'] then
+                            dist = global_byte - tok['end'] + 1
+                        else
+                            dist = 0
+                        end
+                        if dist < best_dist then
+                            best_near = tok; best_dist = dist
+                        end
+                    end
+                end
+                -- Only snap to nearby tokens (within ~2 characters worth of bytes)
+                if best_near and best_dist <= 6 then return best_near end
             end
         end
     end
-    if best then return best end
 
-    -- Pass 2: graduated proximity (relax X by 14px, Y by 6px).
-    -- Score = edge distance (smaller = better); tie-break by span length.
-    local PROX_X, PROX_Y = 14, 6
-    local best2, best_score, best2_span = nil, math.huge, math.huge
+    -- Fallback: region-based proximity search for edge cases
+    -- (e.g., mouse slightly outside computed line bounds)
+    local best_fb, best_fb_dist = nil, math.huge
     for _, r in ipairs(subtitle_regions) do
-        if my >= r.y1 - PROX_Y and my <= r.y2 + PROX_Y and
-           mx >= r.x1 - PROX_X and mx <= r.x2 + PROX_X then
-            -- Distance from the nearest edge of the region (0 if inside)
-            local dx = (mx < r.x1) and (r.x1 - mx) or (mx > r.x2) and (mx - r.x2) or 0
-            local dy = (my < r.y1) and (r.y1 - my) or (my > r.y2) and (my - r.y2) or 0
-            local score = dx * dx + dy * dy  -- squared Euclidean; no sqrt needed
-            if score < best_score or (score == best_score and r.span < best2_span) then
-                best_score = score; best2_span = r.span; best2 = r.token
+        if my >= r.y1 - 6 and my <= r.y2 + 6 then
+            local cx = (r.x1 + r.x2) / 2
+            local cy = (r.y1 + r.y2) / 2
+            local dx = math.abs(mx - cx)
+            local dy = math.abs(my - cy)
+            -- Only consider tokens reasonably close (within 40px horizontally)
+            if dx <= 40 then
+                local dist = dx + dy * 2  -- weight Y distance higher
+                if dist < best_fb_dist then
+                    best_fb_dist = dist; best_fb = r.token
+                end
             end
         end
     end
-    if best2 then return best2 end
-
-    -- Pass 3: wider X search (28px) if cursor is on the correct Y line.
-    -- Only activates when nothing was found in pass 2 — catches edge glyphs.
-    local best3, best3_dist = nil, math.huge
-    for _, r in ipairs(subtitle_regions) do
-        if my >= r.y1 and my <= r.y2 and mx >= r.x1 - 28 and mx <= r.x2 + 28 then
-            local dx = (mx < r.x1) and (r.x1 - mx) or (mx > r.x2) and (mx - r.x2) or 0
-            if dx < best3_dist then best3_dist = dx; best3 = r.token end
-        end
-    end
-    if best3 then return best3 end
-
-    -- Pass 4: gap snapping — if cursor is in a small gap between two adjacent
-    -- tokens on the same Y line, snap to the nearest token edge.
-    local GAP_SNAP = 8  -- max gap size in px to bridge
-    local best4, best4_dist = nil, math.huge
-    for _, r in ipairs(subtitle_regions) do
-        if my >= r.y1 and my <= r.y2 then
-            -- Check if cursor is just outside the left or right edge
-            local dist_left  = (mx < r.x1) and (r.x1 - mx) or math.huge
-            local dist_right = (mx > r.x2) and (mx - r.x2) or math.huge
-            local dist = math.min(dist_left, dist_right)
-            if dist <= GAP_SNAP and dist < best4_dist then
-                best4_dist = dist; best4 = r.token
-            end
-        end
-    end
-    return best4
+    return best_fb
 end
 
 local function find_hovered_button(mx, my)
@@ -1510,6 +1570,7 @@ local function refresh_after_action()
         cached_sub_ass      = nil
         cached_sub_token_id = nil
         cached_sub_regions  = nil
+        cached_sub_line_data = nil
         if popup_visible and popup_token then
             dlog('[refresh_after_action] Popup visible, updating tokens')
             for _, tok in ipairs(current_tokens) do
@@ -1641,9 +1702,11 @@ local function on_subtitle_change(_, new_text)
     popup_rect     = nil
     popup_toast_text = nil
     subtitle_regions    = {}
+    subtitle_line_data  = {}
     cached_sub_ass      = nil
     cached_sub_token_id = nil
     cached_sub_regions  = nil
+    cached_sub_line_data = nil
     kanji_extract_cache = {}
     last_popup_render_key = nil
     render_popup()
@@ -1665,6 +1728,7 @@ local function on_subtitle_change(_, new_text)
                 cached_sub_ass      = nil
                 cached_sub_token_id = nil
                 cached_sub_regions  = nil
+                cached_sub_line_data = nil
                 render_subtitles()
             end
         end)
@@ -1707,6 +1771,7 @@ local function close_popup()
     cached_sub_ass      = nil
     cached_sub_token_id = nil
     cached_sub_regions  = nil
+    cached_sub_line_data = nil
     render_popup()
     render_subtitles()
     jpdb_resume()
@@ -1742,6 +1807,7 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                     cached_sub_ass = nil
                     cached_sub_token_id = nil
                     cached_sub_regions = nil
+                    cached_sub_line_data = nil
                     render_subtitles()
                 end
                 local hit = find_hovered_button(mx, my)
@@ -1802,6 +1868,7 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                     cached_sub_ass      = nil
                     cached_sub_token_id = nil
                     cached_sub_regions  = nil
+                    cached_sub_line_data = nil
                     render_subtitles()
                     if hovered_token then
                         jpdb_pause()
@@ -1859,6 +1926,7 @@ local function handle_left_click(event)
                 cached_sub_ass = nil
                 cached_sub_token_id = nil
                 cached_sub_regions = nil
+                cached_sub_line_data = nil
                 dlog('[handle_left_click] About to render_subtitles')
                 render_subtitles()
                 dlog('[handle_left_click] After render_subtitles')
@@ -1969,6 +2037,7 @@ local function debounced_resize_render()
         cached_sub_ass = nil
         cached_sub_token_id = nil
         cached_sub_regions = nil
+        cached_sub_line_data = nil
         last_popup_render_key = nil
         render_subtitles()
         render_popup()
