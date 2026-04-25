@@ -351,9 +351,11 @@ end
 --   Half-width (26 px): ASCII, Latin extensions, Greek, halfwidth Katakana
 
 local SUB_CONF = conf.SUBTITLE_OVERLAY
-local PX_FULL = SUB_CONF.px_full
-local PX_HALF = SUB_CONF.px_half
-local LINE_H  = SUB_CONF.line_h
+local PX_FULL   = SUB_CONF.px_full
+local PX_HALF   = SUB_CONF.px_half
+local PX_NARROW = SUB_CONF.px_narrow or 18
+local LINE_H    = SUB_CONF.line_h
+local BORD_W    = SUB_CONF.bord_w or 2
 
 -- Returns (pixel_width, next_byte_index) for the UTF-8 character at byte i.
 -- Refined classification vs v2:
@@ -362,7 +364,13 @@ local LINE_H  = SUB_CONF.line_h
 --   · CJK Compat Ideographs (U+F900..U+FAFF) → full
 local function char_px(s, i)
     local b = s:byte(i)
-    if b < 0x80 then return PX_HALF, i + 1 end  -- ASCII
+    if b < 0x80 then
+        -- Refined ASCII width: letters/digits = half, punctuation/space = narrow
+        if b == 0x20 then return PX_NARROW, i + 1 end  -- space
+        if (b >= 0x41 and b <= 0x5A) or (b >= 0x61 and b <= 0x7A) then return PX_HALF, i + 1 end  -- A-Z, a-z
+        if b >= 0x30 and b <= 0x39 then return PX_HALF, i + 1 end  -- 0-9
+        return PX_NARROW, i + 1  -- punctuation: .,!?;:'"()-/ etc.
+    end
     if b < 0xE0 then return PX_HALF, i + 2 end  -- 2-byte (Latin, Greek, etc.)
     if b < 0xF0 then
         -- 3-byte: decode first 2 bytes to get codepoint block
@@ -747,10 +755,12 @@ local function render_subtitles()
     for li, ln in ipairs(layout.lines) do
         local from_bottom = layout.n - li
         local line_bottom = layout.sub_y - from_bottom * LINE_H
-        -- Vertical hit region: ascender-to-descender range with generous padding.
-        -- font_size * 0.92 ≈ visual cap height; +6 above for ascenders, +10 below for descenders
-        local y1 = line_bottom - math.floor(SUB_CONF.font_size * 0.92) - 6
-        local y2 = line_bottom + 10
+        -- Vertical hit region calibrated to font metrics + border
+        local ascent  = SUB_CONF.ascent_ratio or 0.88
+        local descent = SUB_CONF.descent_ratio or 0.15
+        local vpad    = SUB_CONF.vert_pad or 4
+        local y1 = line_bottom - math.floor(SUB_CONF.font_size * ascent) - BORD_W - vpad
+        local y2 = line_bottom + math.floor(SUB_CONF.font_size * descent) + BORD_W + vpad
 
         local px_map, total_px = build_px_map(ln.text)
         local line_left = sub_x - total_px / 2
@@ -778,9 +788,14 @@ local function render_subtitles()
             -- so single-kana particles are easier to target.
             local raw_w = px1 - px0
             local pad_x = (raw_w < 30) and math.floor((30 - raw_w) / 2) or 0
+            -- Drift compensation: add proportional expansion based on distance from center
+            -- Characters farther from center accumulate more estimation error
+            local center_offset = math.abs((px0 + px1) / 2 - total_px / 2)
+            local drift_pad = math.floor(center_offset * 0.04)  -- ~4% expansion per distance from center
+            pad_x = pad_x + drift_pad
             subtitle_regions[#subtitle_regions+1] = {
-                x1    = math.floor(line_left + px0) - pad_x,
-                x2    = math.floor(line_left + px1) + pad_x,
+                x1    = math.floor(line_left + px0) - pad_x - BORD_W,
+                x2    = math.floor(line_left + px1) + pad_x + BORD_W,
                 y1    = y1,
                 y2    = y2,
                 token = tok,
@@ -1381,11 +1396,15 @@ end
 -- ─── Hit testing──────────────────────────────────────────────────────────────
 
 local function find_hovered_token(mx, my)
-    -- Pass 1: exact hit; prefer shorter spans (resolved during region build)
-    local best, best_span = nil, math.huge
+    -- Pass 1: exact hit; prefer shorter spans, then closer center
+    local best, best_span, best_cdist = nil, math.huge, math.huge
     for _, r in ipairs(subtitle_regions) do
         if my >= r.y1 and my <= r.y2 and mx >= r.x1 and mx <= r.x2 then
-            if r.span < best_span then best = r.token; best_span = r.span end
+            local center_x = (r.x1 + r.x2) / 2
+            local cdist = math.abs(mx - center_x)
+            if r.span < best_span or (r.span == best_span and cdist < best_cdist) then
+                best = r.token; best_span = r.span; best_cdist = cdist
+            end
         end
     end
     if best then return best end
@@ -1417,7 +1436,24 @@ local function find_hovered_token(mx, my)
             if dx < best3_dist then best3_dist = dx; best3 = r.token end
         end
     end
-    return best3
+    if best3 then return best3 end
+
+    -- Pass 4: gap snapping — if cursor is in a small gap between two adjacent
+    -- tokens on the same Y line, snap to the nearest token edge.
+    local GAP_SNAP = 8  -- max gap size in px to bridge
+    local best4, best4_dist = nil, math.huge
+    for _, r in ipairs(subtitle_regions) do
+        if my >= r.y1 and my <= r.y2 then
+            -- Check if cursor is just outside the left or right edge
+            local dist_left  = (mx < r.x1) and (r.x1 - mx) or math.huge
+            local dist_right = (mx > r.x2) and (mx - r.x2) or math.huge
+            local dist = math.min(dist_left, dist_right)
+            if dist <= GAP_SNAP and dist < best4_dist then
+                best4_dist = dist; best4 = r.token
+            end
+        end
+    end
+    return best4
 end
 
 local function find_hovered_button(mx, my)

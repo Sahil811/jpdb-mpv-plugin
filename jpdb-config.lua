@@ -78,19 +78,23 @@ local DS = {
 
 -- ======== SUBTITLE OVERLAY SETTINGS ========
 local SUBTITLE_OVERLAY = {
-    -- Distance from the bottom of the screen (in pixels)
-    -- Increase this if your subtitles overlap with the system UI or standard bottom subtitles
     pos_y_offset = 90,
-
-    -- Subtitle font size rendering
     font_size    = 60,  
 
-    -- Glyph width tracking for hit detection. If you change font_size,
-    -- ideally you should change these proportionally.
-    -- e.g. if font_size goes from 48 -> 60 (+25%), PX_FULL from 48 -> 60, PX_HALF from 26 -> ~32
-    px_full      = 60,
-    px_half      = 32,
+    -- Glyph width tracking for hit detection (3 width classes)
+    px_full      = 60,   -- CJK ideographs, hiragana, katakana, fullwidth punct
+    px_half      = 32,   -- ASCII letters, digits, Latin extensions
+    px_narrow    = 18,   -- ASCII punctuation, spaces (.,!?;:'" etc.)
+
     line_h       = 72,
+
+    -- Border width used in ASS rendering (\bordN) — hit regions expand by this
+    bord_w       = 2,
+
+    -- Vertical hit region calibration (fractions of font_size)
+    ascent_ratio  = 0.88,  -- portion of font_size above baseline
+    descent_ratio = 0.15,  -- portion of font_size below baseline
+    vert_pad      = 4,     -- extra vertical padding (px) on top and bottom
 }
 
 
