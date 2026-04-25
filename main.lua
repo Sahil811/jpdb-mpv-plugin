@@ -1237,7 +1237,7 @@ render_popup = function()
                 -- Kana text centred in cell
                 textc(fg, cell_x + mora_w / 2, kana_y + PA_KANA_H / 2,
                     FONT_FAMILY, PA_KANA_FS - 2, false,
-                    '&HFAF8F2&', AL_SOLID, tostring(pa_morae[mi]))
+                    DS.pitch_kana, AL_SOLID, tostring(pa_morae[mi]))
 
                 -- Red vertical connector at pitch transitions
                 if mi > 1 and is_high(mi - 1) ~= high then
@@ -1256,9 +1256,9 @@ render_popup = function()
                 cur_x = cur_x + mora_w + PA_GAP
             end
 
-            -- Pattern label to the LEFT of the bar — larger, bold, easy to read
+            -- Pattern label to the LEFT of the bar
             textc(fg, bar_x - 14, kana_y + PA_KANA_H / 2,
-                FONT_FAMILY, 20, true, '&HEED8B0&', AL_SOLID, pa_label or '?')
+                FONT_FAMILY, 20, true, DS.pitch_label, AL_SOLID, pa_label or '?')
         end)
         if not ok then dlog('[pitch_accent] render error: ' .. tostring(err_pa)) end
     end

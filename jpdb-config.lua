@@ -81,7 +81,8 @@ local THEMES = {
         pitch_high  = '&H4343E0&',
         pitch_low   = '&HE16941&',
         pitch_conn  = '&H4343E0&',
-        pitch_label = '&HC0A880&',
+        pitch_kana  = '&HFAF8F2&',
+        pitch_label = '&HEED8B0&',
 
         -- Kanji breakdown decoration
         kanji_shadow    = '&H000000&',
@@ -130,7 +131,8 @@ local THEMES = {
         pitch_high  = '&H2020C0&',
         pitch_low   = '&HC05828&',
         pitch_conn  = '&H2020C0&',
-        pitch_label = '&H806840&',
+        pitch_kana  = '&H2A2820&',
+        pitch_label = '&H584020&',
 
         kanji_shadow    = '&HC0B8B0&',
         kanji_glow_alpha = '&H80&',
@@ -177,7 +179,8 @@ local THEMES = {
         pitch_high  = '&H5050F0&',
         pitch_low   = '&HF07848&',
         pitch_conn  = '&H5050F0&',
-        pitch_label = '&HC8A078&',
+        pitch_kana  = '&HF0E0D8&',
+        pitch_label = '&HE8C098&',
 
         kanji_shadow    = '&H000000&',
         kanji_glow_alpha = '&H50&',
@@ -224,7 +227,8 @@ local THEMES = {
         pitch_high  = '&H2F32DC&',  -- red
         pitch_low   = '&HD28B26&',  -- blue
         pitch_conn  = '&H2F32DC&',
-        pitch_label = '&H756E58&',
+        pitch_kana  = '&H94A4AD&',  -- base1
+        pitch_label = '&H839496&',  -- base0
 
         kanji_shadow    = '&H1A1200&',
         kanji_glow_alpha = '&H70&',
@@ -271,6 +275,7 @@ local THEMES = {
         pitch_high  = '&H6666F9&',  -- warm red
         pitch_low   = '&HE87CF6&',  -- pink
         pitch_conn  = '&H6666F9&',
+        pitch_kana  = '&HE8E8E0&',
         pitch_label = '&H56DCE6&',
 
         kanji_shadow    = '&H000000&',
@@ -347,7 +352,7 @@ local SUBTITLE_OVERLAY = {
 -- Available: 'dark', 'light', 'midnight', 'solarized', 'monokai'
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-apply_theme('dark')
+apply_theme('monokai')
 
 -- Build BTN_MAP from current DS (must be called after apply_theme)
 local function build_btn_map()
