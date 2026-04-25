@@ -933,47 +933,53 @@ local function render_subtitles()
     -- Pre-wrap: split lines that are wider than the screen so our layout model
     -- (background rects, hit regions) matches what libass would render.
     local max_sub_w = osd_w * 0.85
-    local wrapped = {}
-    for _, ln in ipairs(layout.lines) do
+    local function wrap_line(ln, depth)
+        if depth > 3 then return { ln } end  -- safety limit
         local bounds = measure_line_bounds(ln.text, SUB_CONF.font_size)
-        if bounds and bounds.width > max_sub_w and #ln.text > 4 then
-            local lbs = ln.byte_start
-            local lbe = lbs + #ln.text
-            -- Collect unique token-boundary byte positions within this line
-            local splits = {}
-            for _, tok in ipairs(current_tokens) do
-                local ts, te = tok.start, tok['end']
-                if ts > lbs and ts < lbe then splits[#splits+1] = ts end
-                if te > lbs and te < lbe then splits[#splits+1] = te end
-            end
-            table.sort(splits)
-            -- Deduplicate
-            local uniq = {}
-            for _, s in ipairs(splits) do
-                if #uniq == 0 or uniq[#uniq] ~= s then uniq[#uniq+1] = s end
-            end
-            -- Pick the split closest to the visual midpoint
-            local best, best_dist = nil, math.huge
-            if #uniq > 0 then
-                local target = bounds.width / 2
-                for _, s in ipairs(uniq) do
-                    local prefix = ln.text:sub(1, s - lbs)
-                    local pb = measure_line_bounds(prefix, SUB_CONF.font_size)
-                    if pb then
-                        local d = math.abs(pb.width - target)
-                        if d < best_dist then best_dist = d; best = s end
-                    end
+        if not bounds or bounds.width <= max_sub_w or #ln.text <= 4 then
+            return { ln }
+        end
+        local lbs = ln.byte_start
+        local lbe = lbs + #ln.text
+        -- Collect unique token-boundary byte positions within this line
+        local splits = {}
+        for _, tok in ipairs(current_tokens) do
+            local ts, te = tok.start, tok['end']
+            if ts > lbs and ts < lbe then splits[#splits+1] = ts end
+            if te > lbs and te < lbe then splits[#splits+1] = te end
+        end
+        table.sort(splits)
+        local uniq = {}
+        for _, s in ipairs(splits) do
+            if #uniq == 0 or uniq[#uniq] ~= s then uniq[#uniq+1] = s end
+        end
+        -- Pick the split closest to the visual midpoint
+        local best, best_dist = nil, math.huge
+        if #uniq > 0 then
+            local target = bounds.width / 2
+            for _, s in ipairs(uniq) do
+                local prefix = ln.text:sub(1, s - lbs)
+                local pb = measure_line_bounds(prefix, SUB_CONF.font_size)
+                if pb then
+                    local d = math.abs(pb.width - target)
+                    if d < best_dist then best_dist = d; best = s end
                 end
             end
-            if best then
-                local s1 = best - lbs
-                wrapped[#wrapped+1] = { text = ln.text:sub(1, s1),     byte_start = lbs  }
-                wrapped[#wrapped+1] = { text = ln.text:sub(s1 + 1),    byte_start = best }
-            else
-                wrapped[#wrapped+1] = ln
-            end
-        else
-            wrapped[#wrapped+1] = ln
+        end
+        if not best then return { ln } end
+        local s1 = best - lbs
+        local part1 = { text = ln.text:sub(1, s1),  byte_start = lbs  }
+        local part2 = { text = ln.text:sub(s1 + 1), byte_start = best }
+        -- Recurse: each half may still be too wide on very small screens
+        local r1 = wrap_line(part1, depth + 1)
+        local r2 = wrap_line(part2, depth + 1)
+        for _, l in ipairs(r2) do r1[#r1+1] = l end
+        return r1
+    end
+    local wrapped = {}
+    for _, ln in ipairs(layout.lines) do
+        for _, wl in ipairs(wrap_line(ln, 0)) do
+            wrapped[#wrapped+1] = wl
         end
     end
     layout.lines = wrapped
@@ -1095,39 +1101,85 @@ local function render_subtitles()
     local a = assdraw.ass_new()
 
     -- Subtitle background panels (drawn first so text renders on top)
-    if SUB_CONF.bg_enabled and DS.sub_bg_color then
-        local ph = SUB_CONF.bg_pad_h or 14
-        local pv = SUB_CONF.bg_pad_v or 8
-        local r  = SUB_CONF.bg_radius or 8
+    if SUB_CONF.bg_enabled and DS.sub_bg_color and #subtitle_line_data > 0 then
+        local ph = SUB_CONF.bg_pad_h or 18
+        local pv = SUB_CONF.bg_pad_v or 10
+        local r  = SUB_CONF.bg_radius or 10
+        local bw = SUB_CONF.bg_border or 1
 
-        for _, ld in ipairs(subtitle_line_data) do
-            local bx1 = math.floor(ld.actual_x0 - ph)
-            local bx2 = math.floor(ld.actual_x0 + ld.actual_total + ph)
-            local by1 = math.floor(ld.y1 - pv)
-            local by2 = math.floor(ld.y2 + pv)
+        -- Rounded rectangle drawing helper
+        local function draw_rrect(ass, x1, y1, x2, y2, rad)
+            if rad > 0 then
+                local k = math.floor(rad * 0.55)
+                ass:append(string.format(
+                    'm %d %d '
+                 .. 'l %d %d b %d %d %d %d %d %d '
+                 .. 'l %d %d b %d %d %d %d %d %d '
+                 .. 'l %d %d b %d %d %d %d %d %d '
+                 .. 'l %d %d b %d %d %d %d %d %d',
+                    x1+rad, y1,
+                    x2-rad, y1, x2-rad+k, y1, x2, y1+rad-k, x2, y1+rad,
+                    x2, y2-rad, x2, y2-rad+k, x2-rad+k, y2, x2-rad, y2,
+                    x1+rad, y2, x1+rad-k, y2, x1, y2-rad+k, x1, y2-rad,
+                    x1, y1+rad, x1, y1+rad-k, x1+rad-k, y1, x1+rad, y1
+                ))
+            else
+                ass:append(string.format('m %d %d l %d %d l %d %d l %d %d',
+                    x1, y1, x2, y1, x2, y2, x1, y2))
+            end
+        end
 
+        if SUB_CONF.bg_style == 'unified' then
+            -- Unified panel: one cohesive rounded rect spanning all lines
+            local min_x, max_x = math.huge, -math.huge
+            local min_y, max_y = math.huge, -math.huge
+            for _, ld in ipairs(subtitle_line_data) do
+                local lx1 = ld.actual_x0
+                local lx2 = ld.actual_x0 + ld.actual_total
+                if lx1 < min_x then min_x = lx1 end
+                if lx2 > max_x then max_x = lx2 end
+                if ld.y1 < min_y then min_y = ld.y1 end
+                if ld.y2 > max_y then max_y = ld.y2 end
+            end
+            local bx1 = math.floor(min_x - ph)
+            local bx2 = math.floor(max_x + ph)
+            local by1 = math.floor(min_y - pv)
+            local by2 = math.floor(max_y + pv)
+
+            -- Fill
             a:new_event()
             a:append('{\\an7\\pos(0,0)\\bord0\\shad0\\1c' .. DS.sub_bg_color
                   .. '\\1a' .. DS.sub_bg_alpha .. '\\p1}')
-            -- Rounded rectangle using cubic Bézier curves
-            -- k = magic number for circular arc approximation ≈ 0.5522847
-            if r > 0 then
-                local k = math.floor(r * 0.55)
-                a:append(string.format(
-                    'm %d %d '
-                 .. 'l %d %d b %d %d %d %d %d %d '  -- top-right corner
-                 .. 'l %d %d b %d %d %d %d %d %d '  -- bottom-right corner
-                 .. 'l %d %d b %d %d %d %d %d %d '  -- bottom-left corner
-                 .. 'l %d %d b %d %d %d %d %d %d',   -- top-left corner
-                    bx1+r, by1,                       -- start
-                    bx2-r, by1, bx2-r+k, by1, bx2, by1+r-k, bx2, by1+r,
-                    bx2, by2-r, bx2, by2-r+k, bx2-r+k, by2, bx2-r, by2,
-                    bx1+r, by2, bx1+r-k, by2, bx1, by2-r+k, bx1, by2-r,
-                    bx1, by1+r, bx1, by1+r-k, bx1+r-k, by1, bx1+r, by1
-                ))
-            else
-                a:append(string.format('m %d %d l %d %d l %d %d l %d %d',
-                    bx1, by1, bx2, by1, bx2, by2, bx1, by2))
+            draw_rrect(a, bx1, by1, bx2, by2, r)
+
+            -- Subtle edge border for depth
+            if bw > 0 then
+                a:new_event()
+                a:append('{\\an7\\pos(0,0)\\bord' .. bw .. '\\shad0\\1c' .. DS.sub_bg_color
+                      .. '\\1a&HFF&\\3c' .. DS.sub_bg_color
+                      .. '\\3a' .. (SUB_CONF.bg_border_alpha or '&HA0&') .. '\\p1}')
+                draw_rrect(a, bx1, by1, bx2, by2, r)
+            end
+        else
+            -- Per-line mode: individual fitted rectangles
+            for _, ld in ipairs(subtitle_line_data) do
+                local bx1 = math.floor(ld.actual_x0 - ph)
+                local bx2 = math.floor(ld.actual_x0 + ld.actual_total + ph)
+                local by1 = math.floor(ld.y1 - pv)
+                local by2 = math.floor(ld.y2 + pv)
+
+                a:new_event()
+                a:append('{\\an7\\pos(0,0)\\bord0\\shad0\\1c' .. DS.sub_bg_color
+                      .. '\\1a' .. DS.sub_bg_alpha .. '\\p1}')
+                draw_rrect(a, bx1, by1, bx2, by2, r)
+
+                if bw > 0 then
+                    a:new_event()
+                    a:append('{\\an7\\pos(0,0)\\bord' .. bw .. '\\shad0\\1c' .. DS.sub_bg_color
+                          .. '\\1a&HFF&\\3c' .. DS.sub_bg_color
+                          .. '\\3a' .. (SUB_CONF.bg_border_alpha or '&HA0&') .. '\\p1}')
+                    draw_rrect(a, bx1, by1, bx2, by2, r)
+                end
             end
         end
     end

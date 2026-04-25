@@ -363,13 +363,17 @@ local SUBTITLE_OVERLAY = {
 
     -- Subtitle background panel
     -- Set bg_enabled=true for a semi-transparent backdrop behind subtitle text.
-    -- bg_padding: horizontal/vertical insets around the text bounding box.
+    -- bg_style: 'unified' = one panel for all lines (Netflix-style),
+    --           'per_line' = separate rect per line (fitted).
     -- bg_radius: corner rounding (0 = sharp corners, higher = more rounded).
     -- Color & alpha come from the active theme (sub_bg_color, sub_bg_alpha).
     bg_enabled    = true,
-    bg_pad_h      = 14,    -- horizontal padding (px)
-    bg_pad_v      = 8,     -- vertical padding (px)
-    bg_radius     = 8,     -- corner radius (px)
+    bg_style      = 'unified', -- 'unified' or 'per_line'
+    bg_pad_h      = 18,    -- horizontal padding (px)
+    bg_pad_v      = 10,    -- vertical padding (px)
+    bg_radius     = 10,    -- corner radius (px)
+    bg_border     = 1,     -- subtle edge border width (0 = none)
+    bg_border_alpha = '&HA0&', -- border opacity (lighter than fill)
 }
 
 
