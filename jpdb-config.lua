@@ -92,7 +92,7 @@ local SUBTITLE_OVERLAY = {
     -- Compensates for differences between our Go font metrics and libass's
     -- FreeType rendering. Use Ctrl+= / Ctrl+- in mpv to tune in real-time.
     -- Decrease if hover regions are too wide (edges inaccurate).
-    width_scale  = 0.935,
+    width_scale  = 1.0,
 
     line_h       = 72,
 

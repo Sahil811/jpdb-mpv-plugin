@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -746,14 +747,17 @@ func computePixelMap(text string, fontSize float64) [][]float64 {
 			if hasPrev {
 				kern, err := metricsFont.Kern(&buf, prevGlyph, idx, ppem, font.HintingNone)
 				if err == nil {
-					cumPx += float64(kern) / 64.0
+					cumPx += math.Round(float64(kern) / 64.0)
 				}
 			}
 			adv, err := metricsFont.GlyphAdvance(&buf, idx, ppem, font.HintingNone)
 			if err != nil {
 				cumPx += fontSize
 			} else {
-				cumPx += float64(adv) / 64.0
+				// Round each advance to integer pixels to match FreeType's
+				// grid-fitting behavior. Without this, fractional errors
+				// accumulate left-to-right causing asymmetric hover drift.
+				cumPx += math.Round(float64(adv) / 64.0)
 			}
 			prevGlyph = idx
 			hasPrev = true
