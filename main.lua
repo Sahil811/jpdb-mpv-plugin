@@ -2146,7 +2146,50 @@ local function on_subtitle_change(_, new_text)
         render_subtitles(); return
     end
 
+    -- Detect if text contains Japanese characters (hiragana, katakana, CJK).
+    -- Non-Japanese subtitles (English, etc.) are shown as plain white text
+    -- without sending to the parse server.
+    local has_jp = false
+    local i, len = 1, #new_text
+    while i <= len do
+        local b = new_text:byte(i)
+        if b >= 0xE0 and b < 0xF0 then
+            -- 3-byte UTF-8: decode codepoint
+            local b2 = new_text:byte(i+1) or 0
+            local b3 = new_text:byte(i+2) or 0
+            local cp = (b - 0xE0) * 4096 + (b2 - 0x80) * 64 + (b3 - 0x80)
+            -- Hiragana U+3040-309F, Katakana U+30A0-30FF, CJK U+4E00-9FFF,
+            -- Fullwidth U+FF00-FFEF, CJK Extension A U+3400-4DBF
+            if (cp >= 0x3040 and cp <= 0x30FF) or
+               (cp >= 0x4E00 and cp <= 0x9FFF) or
+               (cp >= 0x3400 and cp <= 0x4DBF) or
+               (cp >= 0xFF00 and cp <= 0xFFEF) then
+                has_jp = true; break
+            end
+            i = i + 3
+        elseif b >= 0xF0 then
+            -- 4-byte UTF-8: decode codepoint for CJK Extension B+ (U+20000+)
+            local b2 = new_text:byte(i+1) or 0
+            local b3 = new_text:byte(i+2) or 0
+            local b4 = new_text:byte(i+3) or 0
+            local cp = (b - 0xF0) * 262144 + (b2 - 0x80) * 4096 + (b3 - 0x80) * 64 + (b4 - 0x80)
+            if cp >= 0x20000 and cp <= 0x2FA1F then has_jp = true; break end
+            i = i + 4
+        elseif b >= 0xC0 then i = i + 2
+        else i = i + 1
+        end
+    end
+
     current_text = new_text
+    if not has_jp then
+        -- Non-Japanese text: render as plain white, no parse needed
+        current_tokens = {}
+        current_px_map = nil
+        cached_sub_ass = nil; cached_sub_token_id = nil
+        cached_sub_regions = nil; cached_sub_line_data = nil
+        render_subtitles()
+        return
+    end
     if parse_timer then parse_timer:kill() end
     parse_timer = mp.add_timeout(0.08, function()
         parse_timer = nil
@@ -2173,7 +2216,6 @@ local function on_subtitle_change(_, new_text)
             cached_sub_regions  = nil
             cached_sub_line_data = nil
             render_subtitles()
-            end
         end)
     end)
 end
