@@ -256,6 +256,8 @@ end)
 local server_health_timer = nil
 local server_was_up = false
 local server_reconnect_attempts = 0
+-- Set later once http_request_async and render_subtitles are defined
+local reparse_current_subtitle = nil
 
 local function start_health_monitor()
     if server_health_timer then return end
@@ -267,6 +269,13 @@ local function start_health_monitor()
                     mp.osd_message('[jpdb] Server reconnected ✓', 2)
                     register_with_server()
                     server_reconnect_attempts = 0
+                    -- Re-parse current subtitle so coloring resumes
+                    last_parsed_text = nil
+                    mp.add_timeout(0.5, function()
+                        if reparse_current_subtitle then
+                            reparse_current_subtitle()
+                        end
+                    end)
                 end
                 server_was_up = true
             else
@@ -2145,15 +2154,25 @@ local function on_subtitle_change(_, new_text)
         http_request_async('POST', '/parse',
             { text = new_text, font_size = SUB_CONF.font_size },
             function(res, err)
-            if current_text ~= new_text or err then return end
-            if res and res.tokens then
-                current_tokens      = res.tokens
-                current_px_map      = extract_px_map(res)
+            if current_text ~= new_text then return end
+            if err or not res or not res.tokens then
+                -- Server unreachable or parse failed — show raw text as plain white
+                current_tokens      = {}
+                current_px_map      = nil
                 cached_sub_ass      = nil
                 cached_sub_token_id = nil
                 cached_sub_regions  = nil
                 cached_sub_line_data = nil
                 render_subtitles()
+                return
+            end
+            current_tokens      = res.tokens
+            current_px_map      = extract_px_map(res)
+            cached_sub_ass      = nil
+            cached_sub_token_id = nil
+            cached_sub_regions  = nil
+            cached_sub_line_data = nil
+            render_subtitles()
             end
         end)
     end)
@@ -2162,6 +2181,15 @@ end
 mp.observe_property('sub-text', 'string', on_subtitle_change)
 mp.set_property('sub-visibility', 'no')
 mp.set_property('secondary-sub-visibility', 'no')
+
+-- Wire up the re-parse hook for server reconnection (forward-declared above)
+reparse_current_subtitle = function()
+    local cur = mp.get_property('sub-text', '')
+    if cur ~= '' then
+        last_parsed_text = nil
+        on_subtitle_change(nil, cur)
+    end
+end
 
 
 -- ─── Pause helpers ────────────────────────────────────────────────────────────
