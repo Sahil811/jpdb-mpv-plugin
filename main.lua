@@ -1016,7 +1016,6 @@ end
 -- ══════════════════════════════════════════════════════════════════════════════
 
 local BTN_MAP = conf.BTN_MAP
-
 local BTN_SHORTCUTS = conf.BTN_SHORTCUTS
 
 local WRAP_CHARS = 44
@@ -1050,12 +1049,13 @@ render_popup = function()
 
     popup_buttons = {}
 
-    local render_key = string.format('%s:%s:%s:%s:%s',
+    local render_key = string.format('%s:%s:%s:%s:%s:%s',
         tostring(popup_token and popup_token.card and popup_token.card.vid),
         tostring(popup_token and popup_token.card and popup_token.card.sid),
         tostring(hovered_button),
         tostring(popup_toast_text),
-        tostring(popup_rect and popup_rect.x1))
+        tostring(popup_rect and popup_rect.x1),
+        tostring(conf.get_theme_name()))
     if render_key == last_popup_render_key then return end
 
     local card    = popup_token.card
@@ -1195,11 +1195,11 @@ render_popup = function()
                 return pa_pat:sub(idx, idx) == 'H'
             end
 
-            -- ASS colors (BGR format)
-            local COL_HIGH  = '&H4343E0&'   -- red   #E04343
-            local COL_LOW   = '&HE16941&'   -- blue  #4169E1
-            local COL_CONN  = '&H4343E0&'   -- vertical connector = red
-            local COL_LABEL = '&HC0A880&'   -- warm-gray label
+            -- ASS colors from theme
+            local COL_HIGH  = DS.pitch_high
+            local COL_LOW   = DS.pitch_low
+            local COL_CONN  = DS.pitch_conn
+            local COL_LABEL = DS.pitch_label
             local AL_SOLID  = '&H00&'
 
             -- Right-side anchor: right-aligned inside popup
@@ -1318,14 +1318,10 @@ render_popup = function()
             local k_color, k_alpha = get_kanji_color(k.meaning)
             
             -- SPIRAL ENERGY CORE: Multi-layer depth system
-            -- Layer 4: Outer glow (furthest)
-            rect(bg, bx-5, cy+4, box_width+2, box_height, '&H000000&', '&HF0&')
-            -- Layer 3: Deep shadow
-            rect(bg, bx-3, cy+3, box_width, box_height, '&H000000&', '&HD0&')
-            -- Layer 2: Mid shadow with color tint
+            rect(bg, bx-5, cy+4, box_width+2, box_height, DS.kanji_shadow, '&HF0&')
+            rect(bg, bx-3, cy+3, box_width, box_height, DS.kanji_shadow, '&HD0&')
             rect(bg, bx-2, cy+2, box_width, box_height, k_color, '&HF8&')
-            -- Layer 1: Light shadow
-            rect(bg, bx-1, cy+1, box_width, box_height, '&H000000&', '&HA0&')
+            rect(bg, bx-1, cy+1, box_width, box_height, DS.kanji_shadow, '&HA0&')
             
             -- MAIN CARD: Gradient simulation with multiple strips
             rect(bg, bx-4, cy-2, box_width, box_height, DS.bg_header, '&H00&')
@@ -1342,13 +1338,11 @@ render_popup = function()
             rect(bg, bx-4, cy-2, 8, 1, k_color, '&H60&')  -- Top-left
             rect(bg, bx+box_width-12, cy-2, 8, 1, k_color, '&H60&')  -- Top-right
             
-            -- KANJI: Triple-layer rendering for MAXIMUM DEPTH
-            -- Shadow layer (offset)
+            -- KANJI: Triple-layer rendering
             textc(fg, bx + box_width/2 + 2, cy + DS.lh_kanji/2 + 4, 
-                FONT_FAMILY, DS.fs_kanji-2, true, '&H000000&', '&HC0&', k.kanji)
-            -- Glow layer (colored)
+                FONT_FAMILY, DS.fs_kanji-2, true, DS.kanji_shadow, '&HC0&', k.kanji)
             textc(fg, bx + box_width/2 + 1, cy + DS.lh_kanji/2 + 3, 
-                FONT_FAMILY, DS.fs_kanji-2, true, k_color, '&H60&', k.kanji)
+                FONT_FAMILY, DS.fs_kanji-2, true, k_color, DS.kanji_glow_alpha, k.kanji)
             -- Main layer (crisp)
             textc(fg, bx + box_width/2, cy + DS.lh_kanji/2 + 2, 
                 FONT_FAMILY, DS.fs_kanji-2, true, k_color, '&H00&', k.kanji)
@@ -1359,7 +1353,6 @@ render_popup = function()
             local meaning_width = utf8_len(k.meaning) * 7 + 8
             rect(bg, bx + box_width/2 - meaning_width/2, meaning_y - DS.lh_gloss/2 + 2,
                 meaning_width, DS.lh_gloss - 2, k_color, '&HE8&')
-            -- Glow text
             textc(fg, bx + box_width/2 + 1, meaning_y + 1,
                 FONT_FAMILY, DS.fs_gloss-1, true, k_color, '&HD0&', k.meaning)
             -- Main text
@@ -1382,7 +1375,7 @@ render_popup = function()
             for dot = 1, kanji_count do
                 local dot_x = bx + (dot-1) * 4 + 2
                 local dot_y = cy + box_height - 2
-                local dot_color = (dot == i) and k_color or '&H808080&'
+                local dot_color = (dot == i) and k_color or DS.kanji_dot_idle
                 local dot_alpha = (dot == i) and '&H40&' or '&HC0&'
                 rect(bg, dot_x, dot_y, 2, 2, dot_color, dot_alpha)
             end
@@ -1409,7 +1402,7 @@ render_popup = function()
             local k_color, k_alpha = get_kanji_color(k.meaning)
             
             -- Compact card with energy
-            rect(bg, bx-2, by+1, box_width, box_height, '&H000000&', '&HC0&')  -- Shadow
+            rect(bg, bx-2, by+1, box_width, box_height, DS.kanji_shadow, '&HC0&')  -- Shadow
             rect(bg, bx-3, by-1, box_width, box_height, DS.bg_header, '&H00&')  -- Main
             rect(bg, bx-3, by-1, box_width, 2, k_color, '&H80&')  -- Top bar
             rect(bg, bx-3, by-1, 1, box_height, k_color, '&HC0&')  -- Left line
@@ -1438,11 +1431,11 @@ render_popup = function()
         local ribbon_height = DS.lh_gloss + 8
         
         -- COSMIC BACKGROUND: Multi-layer energy field
-        rect(bg, cx-8, cy+2, W-LB-PAD*2+16, ribbon_height, '&H000000&', '&HE0&')  -- Outer glow
+        rect(bg, cx-8, cy+2, W-LB-PAD*2+16, ribbon_height, DS.kanji_shadow, '&HE0&')  -- Outer glow
         rect(bg, cx-7, cy-4, W-LB-PAD*2+14, ribbon_height, DS.bg_header, '&H00&')  -- Main field
         
-        -- RAINBOW ENERGY STRIPS: Multiple colored accent lines
-        local strip_colors = {'&H3333FF&', '&HFF33FF&', '&H33FF33&', '&H3399FF&', '&HFFFF33&'}
+        -- RAINBOW ENERGY STRIPS
+        local strip_colors = DS.kanji_strip_colors or {'&H3333FF&', '&HFF33FF&', '&H33FF33&', '&H3399FF&', '&HFFFF33&'}
         for i, strip_color in ipairs(strip_colors) do
             rect(bg, cx-7, cy-4 + (i-1)*2, W-LB-PAD*2+14, 1, strip_color, '&HB0&')
         end
@@ -1457,7 +1450,7 @@ render_popup = function()
         local cosmic_line = table.concat(parts, ' ')
         
         -- Triple-layer text for COSMIC DEPTH
-        text(fg, cx+2, cy+2, FONT_FAMILY, DS.fs_gloss, false, '&H000000&', '&HE0&', cosmic_line)  -- Deep shadow
+        text(fg, cx+2, cy+2, FONT_FAMILY, DS.fs_gloss, false, DS.kanji_shadow, '&HE0&', cosmic_line)  -- Deep shadow
         text(fg, cx+1, cy+1, FONT_FAMILY, DS.fs_gloss, false, s_color, '&H80&', cosmic_line)  -- Glow
         text(fg, cx, cy, FONT_FAMILY, DS.fs_gloss, true, DS.col_primary, '&H00&', cosmic_line)  -- Main
         
@@ -1515,7 +1508,7 @@ render_popup = function()
         local bg_col  = is_hov and pal.hov or pal.bg
         rect(bg, bx2, by, bw, bh, bg_col, '&H00&')
         -- top highlight line on hover
-        if is_hov then rect(bg, bx2, by, bw, 1, '&HFFFFFF&', '&HCC&') end
+        if is_hov then rect(bg, bx2, by, bw, 1, DS.btn_hover_line or '&HFFFFFF&', '&HCC&') end
         local sc = BTN_SHORTCUTS[key]
         if sc then
             text(fg, bx2+bw-13, by+3, FONT_FAMILY, DS.fs_shortcut,
@@ -2162,6 +2155,34 @@ end
 
 mp.add_key_binding('ctrl+=', 'jpdb-scale-up',   function() adjust_width_scale(0.005) end)
 mp.add_key_binding('ctrl+-', 'jpdb-scale-down', function() adjust_width_scale(-0.005) end)
+
+
+-- ─── Theme cycling ────────────────────────────────────────────────────────────
+-- Press Ctrl+T to cycle through available popup themes.
+
+local function cycle_theme()
+    local order = conf.THEME_ORDER
+    local cur = conf.get_theme_name()
+    local idx = 1
+    for i, name in ipairs(order) do
+        if name == cur then idx = i; break end
+    end
+    local next_name = order[(idx % #order) + 1]
+    conf.apply_theme(next_name)
+    -- Rebuild BTN_MAP with new theme colors
+    BTN_MAP = conf.build_btn_map()
+    -- Invalidate all render caches
+    last_popup_render_key = nil
+    cached_sub_ass = nil
+    cached_sub_token_id = nil
+    cached_sub_regions = nil
+    cached_sub_line_data = nil
+    render_subtitles()
+    render_popup()
+    mp.osd_message('Theme: ' .. next_name, 2)
+end
+
+mp.add_key_binding('ctrl+t', 'jpdb-cycle-theme', cycle_theme)
 
 
 -- ─── Overlay init & resize ────────────────────────────────────────────────────
