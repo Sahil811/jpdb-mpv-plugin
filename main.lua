@@ -888,8 +888,6 @@ local function render_subtitles()
         local px_map, raw_total = build_px_map(ln.text, lbs)
 
         -- Use compute_bounds to get ACTUAL rendered width from libass.
-        -- This gives us the exact line_left and a calibration scale so our
-        -- font-metric positions match the real rendering.
         local bounds = measure_line_bounds(ln.text, SUB_CONF.font_size)
         local actual_total, actual_x0, cal_scale
         if bounds and raw_total > 0 then
@@ -902,25 +900,13 @@ local function render_subtitles()
             cal_scale    = 1.0
         end
 
-        -- Store per-line hit data for byte-offset-based hover detection
-        subtitle_line_data[#subtitle_line_data+1] = {
-            y1 = y1, y2 = y2,
-            actual_total = actual_total,
-            actual_x0    = actual_x0,
-            raw_total    = raw_total,
-            cal_scale    = cal_scale,
-            text = ln.text,
-            byte_start = lbs,
-            byte_end = lbe,
-        }
-
         -- Build ASS for this line
         local line_ass = build_line_subtitle_ass(current_tokens, current_text, lbs, lbe)
         if line_ass then
             line_parts[#line_parts+1] = line_ass
         end
 
-        -- Build pixel-based hit regions (used for popup placement)
+        -- Collect tokens on this line, sorted shortest-span first (for overlaps)
         local line_toks = {}
         for _, tok in ipairs(current_tokens) do
             if tok.start >= lbs and tok['end'] <= lbe then
@@ -931,13 +917,46 @@ local function render_subtitles()
             return (a['end'] - a.start) < (b['end'] - b.start)
         end)
 
+        -- Measure token boundary positions using compute_bounds on text prefixes.
+        -- This gives us EXACT pixel positions for each token edge as rendered
+        -- by libass, instead of relying on scaled font-metric approximations.
+        local boundary_px = { [0] = 0, [#ln.text] = actual_total }
+        if compute_bounds_available ~= false then
+            -- Collect unique boundary byte positions
+            local boundary_set = {}
+            for _, tok in ipairs(line_toks) do
+                local ls = tok.start - lbs
+                local le = tok['end'] - lbs
+                if ls > 0 and ls < #ln.text then boundary_set[ls] = true end
+                if le > 0 and le < #ln.text then boundary_set[le] = true end
+            end
+            -- Measure prefix width for each boundary
+            for pos in pairs(boundary_set) do
+                local prefix = ln.text:sub(1, pos)
+                local pb = measure_line_bounds(prefix, SUB_CONF.font_size)
+                if pb then
+                    boundary_px[pos] = pb.width
+                else
+                    -- Fallback: scaled font metrics
+                    boundary_px[pos] = (px_map[pos + 1] or 0) * cal_scale
+                end
+            end
+        end
+
+        -- Build token hit regions with measured pixel boundaries
+        local token_regions = {}
         for _, tok in ipairs(line_toks) do
             local ls = tok.start - lbs
             local le = tok['end'] - lbs
-            local px0 = (px_map[ls + 1] or 0) * cal_scale
-            local px1 = (px_map[le + 1] or raw_total) * cal_scale
+            local px0 = boundary_px[ls]
+            local px1 = boundary_px[le]
+            if not px0 then px0 = (px_map[ls + 1] or 0) * cal_scale end
+            if not px1 then px1 = (px_map[le + 1] or raw_total) * cal_scale end
             local raw_w = px1 - px0
             local pad_x = (raw_w < 30) and math.floor((30 - raw_w) / 2) or 0
+            token_regions[#token_regions+1] = {
+                px0 = px0, px1 = px1, tok = tok,
+            }
             subtitle_regions[#subtitle_regions+1] = {
                 x1    = actual_x0 + px0 - pad_x - BORD_W,
                 x2    = actual_x0 + px1 + pad_x + BORD_W,
@@ -947,6 +966,17 @@ local function render_subtitles()
                 span  = le - ls,
             }
         end
+
+        -- Store per-line hit data
+        subtitle_line_data[#subtitle_line_data+1] = {
+            y1 = y1, y2 = y2,
+            actual_total = actual_total,
+            actual_x0    = actual_x0,
+            token_regions = token_regions,
+            text = ln.text,
+            byte_start = lbs,
+            byte_end = lbe,
+        }
     end
 
     -- \an2 rendering: libass handles centering using actual font metrics.
@@ -1617,65 +1647,45 @@ local function px_to_byte_in_line(text, px_target, line_byte_start)
 end
 
 local function find_hovered_token(mx, my)
-    -- Primary: byte-offset mapping — map mouse position directly to a text
-    -- byte offset, then find which token contains it.
-    -- Uses compute_bounds calibration: actual_x0 gives the exact left edge,
-    -- cal_scale converts screen-space offsets to raw font-metric space.
+    -- Primary: direct token-boundary matching using compute_bounds measurements.
+    -- Each token's pixel boundaries were measured by libass itself, so matching
+    -- is exact — no font-metric approximation or scale conversion needed.
     for _, ld in ipairs(subtitle_line_data) do
         if my >= ld.y1 and my <= ld.y2 then
-            local line_left   = ld.actual_x0 or (osd_w / 2 - (ld.actual_total or ld.raw_total or 0) / 2)
-            local line_width  = ld.actual_total or ld.raw_total or 0
-            local cal         = ld.cal_scale or 1.0
+            local line_left  = ld.actual_x0 or (osd_w / 2 - (ld.actual_total or 0) / 2)
+            local line_width = ld.actual_total or 0
 
             -- Mouse offset from line start (screen space)
             local px_offset = mx - line_left
-            -- Allow some leeway outside the line bounds (border + tolerance)
             if px_offset < -(BORD_W + 10) or px_offset > line_width + BORD_W + 10 then
-                -- Try next line (multi-line subtitles)
+                -- Outside this line — try next
             else
-                -- Clamp to valid range
                 px_offset = math.max(0, math.min(px_offset, line_width))
 
-                -- Convert screen-space offset to raw font-metric space
-                local raw_px = (cal > 0) and (px_offset / cal) or px_offset
-
-                -- Find which byte in this line the mouse is over
-                local line_byte = px_to_byte_in_line(ld.text, raw_px, ld.byte_start)
-                -- Convert to global byte offset (0-indexed, matching token offsets)
-                local global_byte = ld.byte_start + line_byte - 1
-
-                -- Find containing token; prefer shortest span on overlap
-                local best, best_span = nil, math.huge
-                for _, tok in ipairs(current_tokens) do
-                    if global_byte >= tok.start and global_byte < tok['end'] then
-                        local span = tok['end'] - tok.start
-                        if span < best_span then
-                            best = tok; best_span = span
+                if ld.token_regions and #ld.token_regions > 0 then
+                    -- Exact match: check measured token pixel ranges
+                    local best, best_span = nil, math.huge
+                    for _, tr in ipairs(ld.token_regions) do
+                        if px_offset >= tr.px0 and px_offset < tr.px1 then
+                            local span = tr.tok['end'] - tr.tok.start
+                            if span < best_span then
+                                best = tr.tok; best_span = span
+                            end
                         end
                     end
-                end
-                if best then return best end
+                    if best then return best end
 
-                -- Mouse is in a gap — find nearest token on this line by byte distance
-                local best_near, best_dist = nil, math.huge
-                for _, tok in ipairs(current_tokens) do
-                    if tok.start >= ld.byte_start and tok['end'] <= ld.byte_end then
-                        -- Distance to nearest edge of token
-                        local dist
-                        if global_byte < tok.start then
-                            dist = tok.start - global_byte
-                        elseif global_byte >= tok['end'] then
-                            dist = global_byte - tok['end'] + 1
-                        else
-                            dist = 0
-                        end
-                        if dist < best_dist then
-                            best_near = tok; best_dist = dist
+                    -- Gap fallback: snap to nearest token by pixel distance
+                    local nearest, nearest_dist = nil, math.huge
+                    for _, tr in ipairs(ld.token_regions) do
+                        local center = (tr.px0 + tr.px1) / 2
+                        local dist = math.abs(px_offset - center)
+                        if dist < nearest_dist then
+                            nearest_dist = dist; nearest = tr.tok
                         end
                     end
+                    if nearest and nearest_dist < 40 then return nearest end
                 end
-                -- Only snap to nearby tokens (within ~2 characters worth of bytes)
-                if best_near and best_dist <= 6 then return best_near end
             end
         end
     end
