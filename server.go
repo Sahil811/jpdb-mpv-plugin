@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -143,9 +144,14 @@ func parseNetscapeCookieJar(data string) map[string]string {
 
 // cookieMapToHeader builds a Cookie request header string from a name→value map.
 func cookieMapToHeader(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	parts := make([]string, 0, len(m))
-	for k, v := range m {
-		parts = append(parts, k+"="+v)
+	for _, k := range keys {
+		parts = append(parts, k+"="+m[k])
 	}
 	return strings.Join(parts, "; ")
 }
@@ -270,11 +276,13 @@ type AsyncLogger struct {
 	f       *os.File
 	buf     *bufio.Writer
 	enabled atomic.Bool
+	done    chan struct{}
 }
 
 func newAsyncLogger(path string, enabled bool) *AsyncLogger {
 	al := &AsyncLogger{
-		ch: make(chan string, 4096),
+		ch:   make(chan string, 4096),
+		done: make(chan struct{}),
 	}
 	al.enabled.Store(enabled)
 	if enabled {
@@ -303,9 +311,20 @@ func (al *AsyncLogger) setDebug(enabled bool, path string) {
 
 func (al *AsyncLogger) drain() {
 	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		select {
-		case line := <-al.ch:
+		case line, ok := <-al.ch:
+			if !ok {
+				// Channel closed — flush and exit
+				if al.buf != nil {
+					al.buf.Flush()
+				}
+				if al.f != nil {
+					al.f.Close()
+				}
+				return
+			}
 			if al.buf != nil {
 				al.buf.WriteString(line)
 			}
@@ -315,6 +334,10 @@ func (al *AsyncLogger) drain() {
 			}
 		}
 	}
+}
+
+func (al *AsyncLogger) Close() {
+	close(al.ch)
 }
 
 func (al *AsyncLogger) Log(format string, args ...any) {
@@ -394,17 +417,17 @@ func newLRUCache(cap int) *LRUCache {
 }
 
 func (c *LRUCache) Get(key string) (json.RawMessage, bool) {
-	c.mu.RLock()
+	c.mu.Lock()
 	e, ok := c.items[key]
-	c.mu.RUnlock()
 	if !ok {
+		c.mu.Unlock()
 		return nil, false
 	}
-	c.mu.Lock()
 	c.remove(e)
 	c.pushFront(e)
+	val := e.val
 	c.mu.Unlock()
-	return e.val, true
+	return val, true
 }
 
 func (c *LRUCache) Set(key string, val json.RawMessage) {
@@ -462,6 +485,17 @@ func (c *LRUCache) pushFront(e *cacheEntry) {
 
 var parseCache = newLRUCache(300)
 
+// Audio cache: vid → decoded audio bytes (OGG)
+type audioCacheEntry struct {
+	data        []byte
+	contentType string
+}
+
+var (
+	audioCacheMu sync.RWMutex
+	audioCache   = make(map[string]*audioCacheEntry, 50)
+)
+
 // ─── HTTPS client ─────────────────────────────────────────────────────────────
 // Tuned transport for jpdb.io: connection pool + HTTP/2 multiplexing.
 
@@ -510,7 +544,7 @@ func jpdbAPI(ctx context.Context, endpoint string, body any) (json.RawMessage, e
 	}
 	defer resp.Body.Close()
 
-	respData, err := io.ReadAll(resp.Body)
+	respData, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20)) // 2 MB limit
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +597,7 @@ func jpdbScrape(ctx context.Context, method, urlPath, formBody, cookie string) (
 
 	setCookie := strings.Join(resp.Header["Set-Cookie"], "; ")
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20)) // 2 MB limit
 	if err != nil {
 		return "", "", err
 	}
@@ -591,6 +625,7 @@ var (
 )
 
 func handleParse(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
 		Text string `json:"text"`
 	}
@@ -730,6 +765,7 @@ func handleParse(w http.ResponseWriter, r *http.Request) {
 // ─── Review handler ───────────────────────────────────────────────────────────
 
 var reviewNoRE = regexp.MustCompile(`name="r"\s+value="(\d+)"`)
+var dataAudioRE = regexp.MustCompile(`data-audio="([^"]+)"`)
 
 var grades = map[string]string{
 	"nothing": "1", "something": "2", "hard": "3",
@@ -738,12 +774,16 @@ var grades = map[string]string{
 }
 
 func handleReview(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
 		VID    any    `json:"vid"`
 		SID    any    `json:"sid"`
 		Rating string `json:"rating"`
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sendError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
 
 	vid := anyToStr(body.VID)
 	sid := anyToStr(body.SID)
@@ -791,13 +831,17 @@ func handleReview(w http.ResponseWriter, r *http.Request) {
 // ─── Set-flag handler ─────────────────────────────────────────────────────────
 
 func handleSetFlag(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
 		VID   any    `json:"vid"`
 		SID   any    `json:"sid"`
 		Flag  string `json:"flag"`
 		State *bool  `json:"state"` // *bool distinguishes false from missing
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sendError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
 
 	vid := anyToStr(body.VID)
 	sid := anyToStr(body.SID)
@@ -857,6 +901,7 @@ func handleSetFlag(w http.ResponseWriter, r *http.Request) {
 // ─── Mine handler ─────────────────────────────────────────────────────────────
 
 func handleMine(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
 		VID         any    `json:"vid"`
 		SID         any    `json:"sid"`
@@ -864,7 +909,10 @@ func handleMine(w http.ResponseWriter, r *http.Request) {
 		Translation string `json:"translation"`
 		Forq        *bool  `json:"forq"` // *bool distinguishes false from missing
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sendError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
 
 	vid := anyToStr(body.VID)
 	sid := anyToStr(body.SID)
@@ -925,11 +973,15 @@ func handleMine(w http.ResponseWriter, r *http.Request) {
 // ─── Lookup handler ───────────────────────────────────────────────────────────
 
 func handleLookup(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
 		VID any `json:"vid"`
 		SID any `json:"sid"`
 	}
-	json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sendError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
 
 	vid := anyToStr(body.VID)
 	sid := anyToStr(body.SID)
@@ -1077,6 +1129,17 @@ func handleWordAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check audio cache
+	audioCacheMu.RLock()
+	if cached, ok := audioCache[vid]; ok {
+		audioCacheMu.RUnlock()
+		w.Header().Set("Content-Type", cached.contentType)
+		w.Header().Set("Cache-Control", "public, max-age=31536000")
+		w.Write(cached.data)
+		return
+	}
+	audioCacheMu.RUnlock()
+
 	// 1. Fetch vocabulary page to find the audio hash
 	vocabUrl := fmt.Sprintf("https://jpdb.io/vocabulary/%s/%s/%s", vid, spelling, reading)
 	if spelling == "" {
@@ -1105,15 +1168,14 @@ func handleWordAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(res.Body)
+	body, err := io.ReadAll(io.LimitReader(res.Body, 2<<20)) // 2 MB limit
 	if err != nil {
 		http.Error(w, "failed to read HTML", http.StatusInternalServerError)
 		return
 	}
 
 	// 2. Extract data-audio hash
-	re := regexp.MustCompile(`data-audio="([^"]+)"`)
-	matches := re.FindAllStringSubmatch(string(body), -1)
+	matches := dataAudioRE.FindAllStringSubmatch(string(body), -1)
 	if len(matches) == 0 {
 		http.Error(w, "no audio hash found", http.StatusNotFound)
 		return
@@ -1143,7 +1205,7 @@ func handleWordAudio(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4. Decrypt XOR'd OGG header (first 4 bytes) and stream
-	audioBytes, err := io.ReadAll(res2.Body)
+	audioBytes, err := io.ReadAll(io.LimitReader(res2.Body, 10<<20)) // 10 MB limit
 	if err != nil {
 		http.Error(w, "failed to read audio", http.StatusInternalServerError)
 		return
@@ -1154,6 +1216,13 @@ func handleWordAudio(w http.ResponseWriter, r *http.Request) {
 		audioBytes[1] ^= 0x23
 		audioBytes[2] ^= 0x54
 		audioBytes[3] ^= 0x0f
+	}
+
+	// Cache the decoded audio
+	if len(audioCache) < 50 {
+		audioCacheMu.Lock()
+		audioCache[vid] = &audioCacheEntry{data: audioBytes, contentType: "audio/ogg"}
+		audioCacheMu.Unlock()
 	}
 
 	w.Header().Set("Content-Type", "audio/ogg")
@@ -1253,4 +1322,5 @@ func main() {
 		log.Fatalf("Server error: %v", err)
 	}
 	logger.Log("Server stopped.")
+	logger.Close()
 }
