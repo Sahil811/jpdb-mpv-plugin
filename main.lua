@@ -2224,7 +2224,7 @@ mp.observe_property('mouse-pos', 'native', function(_, pos)
                 if hover_debounce_timer then
                     hover_debounce_timer:kill(); hover_debounce_timer = nil
                 end
-                hover_pending_token = nil
+                hover_pending_token = popup_token
                 -- Keep hovered_token set to popup_token so subtitle stays visible
                 if popup_token and hovered_token ~= popup_token then
                     hovered_token = popup_token
