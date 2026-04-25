@@ -101,6 +101,10 @@ local THEMES = {
         btn_easy      = { bg='&H603E10&', hov='&H805822&', act='&H9C7030&' },
         btn_neutral   = { bg='&H282218&', hov='&H3C3428&', act='&H504438&' },
         btn_hover_line = '&HFFFFFF&',
+
+        -- Subtitle background
+        sub_bg_color = '&H000000&',
+        sub_bg_alpha = '&H88&',     -- 53% opaque — visible but not heavy
     },
 
     -- ── Light ─ clean paper-white with warm accents ──────────────────────────
@@ -149,6 +153,9 @@ local THEMES = {
         btn_easy      = { bg='&HD0D8F0&', hov='&HB0C0E0&', act='&H98A8D0&' },
         btn_neutral   = { bg='&HE8E4DC&', hov='&HD8D0C8&', act='&HC8C0B8&' },
         btn_hover_line = '&H404040&',
+
+        sub_bg_color = '&HFAF8F2&',
+        sub_bg_alpha = '&H80&',     -- light cream wash
     },
 
     -- ── Midnight ─ deep blue-black with cool highlights ─────────────────────
@@ -197,6 +204,9 @@ local THEMES = {
         btn_easy      = { bg='&H603E18&', hov='&H805828&', act='&H9C7038&' },
         btn_neutral   = { bg='&H2C2018&', hov='&H403428&', act='&H544838&' },
         btn_hover_line = '&HFFC8B0&',
+
+        sub_bg_color = '&H0A0505&',
+        sub_bg_alpha = '&H80&',     -- deep navy
     },
 
     -- ── Solarized ─ Ethan Schoonover's iconic palette ───────────────────────
@@ -245,6 +255,9 @@ local THEMES = {
         btn_easy      = { bg='&H584818&', hov='&H706028&', act='&H887838&' },
         btn_neutral   = { bg='&H423607&', hov='&H584A18&', act='&H6E5E28&' },
         btn_hover_line = '&H94A4AD&',
+
+        sub_bg_color = '&H362B00&',
+        sub_bg_alpha = '&H80&',     -- solarized base03
     },
 
     -- ── Monokai ─ vibrant syntax-inspired dark theme ────────────────────────
@@ -293,6 +306,9 @@ local THEMES = {
         btn_easy      = { bg='&H604418&', hov='&H805C28&', act='&H987438&' },
         btn_neutral   = { bg='&H302C20&', hov='&H484030&', act='&H605840&' },
         btn_hover_line = '&HF0F0E8&',
+
+        sub_bg_color = '&H1A1A10&',
+        sub_bg_alpha = '&H80&',     -- monokai dark
     },
 }
 
@@ -344,6 +360,16 @@ local SUBTITLE_OVERLAY = {
     ascent_ratio  = 0.88,  -- portion of font_size above baseline
     descent_ratio = 0.15,  -- portion of font_size below baseline
     vert_pad      = 4,     -- extra vertical padding (px) on top and bottom
+
+    -- Subtitle background panel
+    -- Set bg_enabled=true for a semi-transparent backdrop behind subtitle text.
+    -- bg_padding: horizontal/vertical insets around the text bounding box.
+    -- bg_radius: corner rounding (0 = sharp corners, higher = more rounded).
+    -- Color & alpha come from the active theme (sub_bg_color, sub_bg_alpha).
+    bg_enabled    = true,
+    bg_pad_h      = 14,    -- horizontal padding (px)
+    bg_pad_v      = 8,     -- vertical padding (px)
+    bg_radius     = 8,     -- corner radius (px)
 }
 
 

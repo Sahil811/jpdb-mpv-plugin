@@ -1043,6 +1043,45 @@ local function render_subtitles()
     -- \an2 rendering: libass handles centering using actual font metrics.
     -- Hit detection uses our px_map (server font metrics) for byte mapping.
     local a = assdraw.ass_new()
+
+    -- Subtitle background panels (drawn first so text renders on top)
+    if SUB_CONF.bg_enabled and DS.sub_bg_color then
+        local ph = SUB_CONF.bg_pad_h or 14
+        local pv = SUB_CONF.bg_pad_v or 8
+        local r  = SUB_CONF.bg_radius or 8
+
+        for _, ld in ipairs(subtitle_line_data) do
+            local bx1 = math.floor(ld.actual_x0 - ph)
+            local bx2 = math.floor(ld.actual_x0 + ld.actual_total + ph)
+            local by1 = math.floor(ld.y1 - pv)
+            local by2 = math.floor(ld.y2 + pv)
+
+            a:new_event()
+            a:append('{\\an7\\pos(0,0)\\bord0\\shad0\\1c' .. DS.sub_bg_color
+                  .. '\\1a' .. DS.sub_bg_alpha .. '\\p1}')
+            -- Rounded rectangle using cubic Bézier curves
+            -- k = magic number for circular arc approximation ≈ 0.5522847
+            if r > 0 then
+                local k = math.floor(r * 0.55)
+                a:append(string.format(
+                    'm %d %d '
+                 .. 'l %d %d b %d %d %d %d %d %d '  -- top-right corner
+                 .. 'l %d %d b %d %d %d %d %d %d '  -- bottom-right corner
+                 .. 'l %d %d b %d %d %d %d %d %d '  -- bottom-left corner
+                 .. 'l %d %d b %d %d %d %d %d %d',   -- top-left corner
+                    bx1+r, by1,                       -- start
+                    bx2-r, by1, bx2-r+k, by1, bx2, by1+r-k, bx2, by1+r,
+                    bx2, by2-r, bx2, by2-r+k, bx2-r+k, by2, bx2-r, by2,
+                    bx1+r, by2, bx1+r-k, by2, bx1, by2-r+k, bx1, by2-r,
+                    bx1, by1+r, bx1, by1+r-k, bx1+r-k, by1, bx1+r, by1
+                ))
+            else
+                a:append(string.format('m %d %d l %d %d l %d %d l %d %d',
+                    bx1, by1, bx2, by1, bx2, by2, bx1, by2))
+            end
+        end
+    end
+
     a:new_event()
     a:append('{\\an2\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')\\fs'
           .. SUB_CONF.font_size .. tag_prefix .. '}')
