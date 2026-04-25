@@ -630,16 +630,21 @@ var (
 // Falls back gracefully — if no font is found, /parse responses omit px_map
 // and the Lua side uses its estimated width model.
 func loadMetricsFont() {
+	// Priority order: YuGothM.ttc has "Yu Gothic UI Regular" (face[1]),
+	// which matches the ASS \fn "Yu Gothic UI" specification.
+	// YuGothR.ttc has "Yu Gothic Regular" + "Yu Gothic UI Semilight" — wrong weights.
 	fontPaths := []string{
-		filepath.Join(os.Getenv("WINDIR"), "Fonts", "YuGothR.ttc"),
 		filepath.Join(os.Getenv("WINDIR"), "Fonts", "YuGothM.ttc"),
+		filepath.Join(os.Getenv("WINDIR"), "Fonts", "YuGothR.ttc"),
 		filepath.Join(os.Getenv("WINDIR"), "Fonts", "YuGothB.ttc"),
+		`C:\Windows\Fonts\YuGothM.ttc`,
+		`C:\Windows\Fonts\YuGothR.ttc`,
+		`C:\Windows\Fonts\YuGothB.ttc`,
 		filepath.Join(os.Getenv("WINDIR"), "Fonts", "yugothic.ttf"),
 		filepath.Join(os.Getenv("WINDIR"), "Fonts", "msgothic.ttc"),
-		`C:\Windows\Fonts\YuGothR.ttc`,
-		`C:\Windows\Fonts\YuGothM.ttc`,
-		`C:\Windows\Fonts\YuGothB.ttc`,
 	}
+
+	targetFamily := "Yu Gothic UI"
 
 	for _, p := range fontPaths {
 		data, err := os.ReadFile(p)
@@ -647,11 +652,13 @@ func loadMetricsFont() {
 			continue
 		}
 
-		// Try as TrueType Collection — enumerate all faces to find best match
+		// Try as TrueType Collection — enumerate all faces to find exact match
 		col, err := sfnt.ParseCollection(data)
 		if err == nil {
 			numFonts := col.NumFonts()
 			logger.Log("FONT file %s: TTC with %d faces", p, numFonts)
+			var bestFont *sfnt.Font
+			bestScore := 0
 			for i := 0; i < numFonts; i++ {
 				f, err := col.Font(i)
 				if err != nil {
@@ -661,13 +668,26 @@ func loadMetricsFont() {
 				name, _ := f.Name(&buf, sfnt.NameIDFamily)
 				full, _ := f.Name(&buf, sfnt.NameIDFull)
 				logger.Log("FONT face[%d]: family=%q full=%q", i, name, full)
-				// Prefer "Yu Gothic UI" face
-				if metricsFont == nil || name == "Yu Gothic UI" {
-					metricsFont = f
-					logger.Log("FONT selected face[%d]: %q", i, name)
+
+				score := 0
+				if name == targetFamily {
+					score = 3 // Exact match: "Yu Gothic UI"
+				} else if strings.HasPrefix(name, targetFamily+" ") {
+					score = 2 // Variant: "Yu Gothic UI Semilight", etc.
+				} else if strings.Contains(name, "Gothic") {
+					score = 1 // Fallback: any Gothic font
+				}
+				if score > bestScore {
+					bestScore = score
+					bestFont = f
+					logger.Log("FONT candidate face[%d]: %q (score=%d)", i, name, score)
 				}
 			}
-			if metricsFont != nil {
+			if bestFont != nil {
+				metricsFont = bestFont
+				var buf sfnt.Buffer
+				name, _ := metricsFont.Name(&buf, sfnt.NameIDFamily)
+				logger.Log("FONT SELECTED: %q from %s", name, p)
 				return
 			}
 		}
