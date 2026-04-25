@@ -802,12 +802,17 @@ local function render_subtitles()
     end
 
     local layout = subtitle_layout()
-    local sub_x  = math.floor(osd_w / 2)
     -- ASS tag: explicit font + zero letter spacing for predictable glyph widths
     local tag_prefix = '\\fn' .. FONT_FAMILY .. '\\fsp0\\bord2\\shad1\\b0'
 
-    -- Build per-line ASS content (joined with \\N for \an2 centering)
-    local line_parts = {}
+    -- Use per-line \an1 events when server px_map is available (pixel-accurate).
+    -- This eliminates centering mismatch: both rendering and hit detection
+    -- use the same width model for positioning.
+    -- Falls back to \an2 single event when px_map is unavailable.
+    local use_per_line = (current_px_map ~= nil)
+
+    local line_events = {}  -- per-line ASS events (for \an1 mode)
+    local line_parts = {}   -- joined with \\N (for \an2 fallback mode)
 
     for li, ln in ipairs(layout.lines) do
         local from_bottom = layout.n - li
@@ -838,7 +843,16 @@ local function render_subtitles()
         -- Build ASS for this line
         local line_ass = build_line_subtitle_ass(current_tokens, current_text, lbs, lbe)
         if line_ass then
-            line_parts[#line_parts+1] = line_ass
+            if use_per_line then
+                -- Per-line \an1 event: we control the left edge explicitly
+                line_events[#line_events+1] = {
+                    x = math.floor(line_left),
+                    y = math.floor(line_bottom),
+                    ass = line_ass,
+                }
+            else
+                line_parts[#line_parts+1] = line_ass
+            end
         end
 
         -- Build pixel-based hit regions (used for popup placement)
@@ -870,12 +884,24 @@ local function render_subtitles()
         end
     end
 
-    -- Single \an2 event: ASS handles centering using actual font metrics
     local a = assdraw.ass_new()
-    a:new_event()
-    a:append('{\\an2\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')\\fs'
-          .. SUB_CONF.font_size .. tag_prefix .. '}')
-    a:append(table.concat(line_parts, '\\N'))
+
+    if use_per_line then
+        -- Per-line \an1 events: each line positioned at our computed left edge
+        for _, ev in ipairs(line_events) do
+            a:new_event()
+            a:append('{\\an1\\pos(' .. ev.x .. ',' .. ev.y .. ')\\fs'
+                  .. SUB_CONF.font_size .. tag_prefix .. '}')
+            a:append(ev.ass)
+        end
+    else
+        -- Fallback: single \an2 event with ASS centering
+        local sub_x = math.floor(osd_w / 2)
+        a:new_event()
+        a:append('{\\an2\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')\\fs'
+              .. SUB_CONF.font_size .. tag_prefix .. '}')
+        a:append(table.concat(line_parts, '\\N'))
+    end
 
     -- Debug: visualize hit regions as semi-transparent rectangles
     if conf.DEBUG_LOG then
@@ -1632,13 +1658,21 @@ end
 -- The px_map comes as an array of [byte_pos, cumulative_px] pairs.
 -- We convert it to a Lua table keyed by byte_pos for O(1) lookup.
 local function extract_px_map(res)
-    if not res or not res.px_map then return nil end
+    if not res or not res.px_map then
+        dlog('[extract_px_map] No px_map in server response — using estimated widths')
+        return nil
+    end
     local map = {}
+    local count = 0
     for _, entry in ipairs(res.px_map) do
         local byte_pos = math.floor(entry[1])
         local px_val   = entry[2]
         map[byte_pos] = px_val
+        count = count + 1
     end
+    local last = res.px_map[count]
+    dlog('[extract_px_map] Got ' .. count .. ' entries, total_px=' ..
+         string.format('%.1f', last and last[2] or 0) .. ' — using per-line \\an1 mode')
     return map
 end
 

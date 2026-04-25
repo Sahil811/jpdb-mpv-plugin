@@ -647,13 +647,27 @@ func loadMetricsFont() {
 			continue
 		}
 
-		// Try as TrueType Collection first
+		// Try as TrueType Collection — enumerate all faces to find best match
 		col, err := sfnt.ParseCollection(data)
 		if err == nil {
-			f, err := col.Font(0)
-			if err == nil {
-				metricsFont = f
-				logger.Log("FONT loaded: %s (collection)", p)
+			numFonts := col.NumFonts()
+			logger.Log("FONT file %s: TTC with %d faces", p, numFonts)
+			for i := 0; i < numFonts; i++ {
+				f, err := col.Font(i)
+				if err != nil {
+					continue
+				}
+				var buf sfnt.Buffer
+				name, _ := f.Name(&buf, sfnt.NameIDFamily)
+				full, _ := f.Name(&buf, sfnt.NameIDFull)
+				logger.Log("FONT face[%d]: family=%q full=%q", i, name, full)
+				// Prefer "Yu Gothic UI" face
+				if metricsFont == nil || name == "Yu Gothic UI" {
+					metricsFont = f
+					logger.Log("FONT selected face[%d]: %q", i, name)
+				}
+			}
+			if metricsFont != nil {
 				return
 			}
 		}
@@ -661,8 +675,10 @@ func loadMetricsFont() {
 		// Try as single font
 		f, err := sfnt.Parse(data)
 		if err == nil {
+			var buf sfnt.Buffer
+			name, _ := f.Name(&buf, sfnt.NameIDFamily)
+			logger.Log("FONT loaded: %s family=%q", p, name)
 			metricsFont = f
-			logger.Log("FONT loaded: %s", p)
 			return
 		}
 	}
@@ -686,6 +702,9 @@ func computePixelMap(text string, fontSize float64) [][]float64 {
 	result := make([][]float64, 0, utf8.RuneCountInString(text)+1)
 	cumPx := 0.0
 	byteIdx := 0
+	var prevGlyph sfnt.GlyphIndex
+	hasPrev := false
+	fallbackCount := 0
 
 	for _, r := range text {
 		result = append(result, []float64{float64(byteIdx + 1), cumPx})
@@ -693,6 +712,7 @@ func computePixelMap(text string, fontSize float64) [][]float64 {
 		idx, err := metricsFont.GlyphIndex(&buf, r)
 		if err != nil || idx == 0 {
 			// Glyph not in font — estimate based on Unicode range
+			fallbackCount++
 			if r >= 0x3000 {
 				cumPx += fontSize
 			} else if r >= 0x80 {
@@ -700,13 +720,23 @@ func computePixelMap(text string, fontSize float64) [][]float64 {
 			} else {
 				cumPx += fontSize * 0.5
 			}
+			hasPrev = false
 		} else {
+			// Apply kerning between consecutive glyphs
+			if hasPrev {
+				kern, err := metricsFont.Kern(&buf, prevGlyph, idx, ppem, font.HintingNone)
+				if err == nil {
+					cumPx += float64(kern) / 64.0
+				}
+			}
 			adv, err := metricsFont.GlyphAdvance(&buf, idx, ppem, font.HintingNone)
 			if err != nil {
 				cumPx += fontSize
 			} else {
 				cumPx += float64(adv) / 64.0
 			}
+			prevGlyph = idx
+			hasPrev = true
 		}
 
 		byteIdx += utf8.RuneLen(r)
@@ -714,6 +744,10 @@ func computePixelMap(text string, fontSize float64) [][]float64 {
 
 	// Sentinel: end of text
 	result = append(result, []float64{float64(byteIdx + 1), cumPx})
+
+	if fallbackCount > 0 {
+		logger.Log("FONT px_map: %d chars, %d glyph fallbacks, total=%.1fpx", utf8.RuneCountInString(text), fallbackCount, cumPx)
+	}
 
 	return result
 }
