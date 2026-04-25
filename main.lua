@@ -802,11 +802,11 @@ local function render_subtitles()
     end
 
     local layout = subtitle_layout()
-    local sub_x  = math.floor(osd_w / 2)
     -- ASS tag: explicit font + zero letter spacing for predictable glyph widths
     local tag_prefix = '\\fn' .. FONT_FAMILY .. '\\fsp0\\bord2\\shad1\\b0'
 
-    local line_parts = {}
+    -- Per-line data for \an1 rendering
+    local line_render_data = {}
 
     for li, ln in ipairs(layout.lines) do
         local from_bottom = layout.n - li
@@ -837,7 +837,11 @@ local function render_subtitles()
         -- Build ASS for this line
         local line_ass = build_line_subtitle_ass(current_tokens, current_text, lbs, lbe)
         if line_ass then
-            line_parts[#line_parts+1] = line_ass
+            line_render_data[#line_render_data+1] = {
+                x = math.floor(line_left),
+                y = math.floor(line_bottom),
+                ass = line_ass,
+            }
         end
 
         -- Build pixel-based hit regions (used for popup placement)
@@ -869,12 +873,15 @@ local function render_subtitles()
         end
     end
 
-    -- Single \an2 event: ASS handles centering using actual font metrics
+    -- Per-line \an1 events: both rendering and hit detection use our width model,
+    -- eliminating centering mismatch. Requires accurate font metrics (px_map).
     local a = assdraw.ass_new()
-    a:new_event()
-    a:append('{\\an2\\pos(' .. sub_x .. ',' .. layout.sub_y .. ')\\fs'
-          .. SUB_CONF.font_size .. tag_prefix .. '}')
-    a:append(table.concat(line_parts, '\\N'))
+    for _, ev in ipairs(line_render_data) do
+        a:new_event()
+        a:append('{\\an1\\pos(' .. ev.x .. ',' .. ev.y .. ')\\fs'
+              .. SUB_CONF.font_size .. tag_prefix .. '}')
+        a:append(ev.ass)
+    end
 
     -- Debug: visualize hit regions as semi-transparent rectangles
     if conf.DEBUG_LOG then
