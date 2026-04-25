@@ -7,3 +7,7 @@ config.json
 
 # Pre-built binary — users build from source or download a release
 jpdb-server.exe
+
+# Backup / temporary files
+*.exe~
+*~

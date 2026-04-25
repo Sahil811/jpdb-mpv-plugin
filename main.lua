@@ -1590,62 +1590,6 @@ end
 
 -- ─── Hit testing──────────────────────────────────────────────────────────────
 
--- Map a pixel offset (relative to line start) to a byte offset within the line.
--- Uses server-provided px_map (font metrics) when available for pixel-accurate
--- mapping, falls back to estimated char_px() model otherwise.
-local function px_to_byte_in_line(text, px_target, line_byte_start)
-    -- Try server-provided font metrics first
-    if current_px_map and line_byte_start then
-        local len = #text
-        local first_px = current_px_map[line_byte_start + 1]
-        if first_px then
-            local best_byte, best_dist = 1, math.huge
-            local i = 1
-            while i <= len do
-                local global_byte = line_byte_start + i
-                local px_val = current_px_map[global_byte]
-                -- Get next character position for center calculation
-                local b = text:byte(i)
-                local ni
-                if     b < 0x80 then ni = i + 1
-                elseif b < 0xE0 then ni = i + 2
-                elseif b < 0xF0 then ni = i + 3
-                else                 ni = i + 4 end
-                local next_px = current_px_map[line_byte_start + ni] or current_px_map[line_byte_start + len + 1]
-                if px_val and next_px then
-                    local char_left = px_val - first_px
-                    local char_right = next_px - first_px
-                    local char_center = (char_left + char_right) / 2
-                    local dist = math.abs(char_center - px_target)
-                    if dist < best_dist then
-                        best_dist = dist
-                        best_byte = i
-                    end
-                end
-                i = ni
-            end
-            return best_byte
-        end
-    end
-
-    -- Fallback: estimated character widths
-    local i, px = 1, 0
-    local len = #text
-    local best_byte, best_dist = 1, math.huge
-    while i <= len do
-        local cw, ni = char_px(text, i)
-        local char_center = px + cw / 2
-        local dist = math.abs(char_center - px_target)
-        if dist < best_dist then
-            best_dist = dist
-            best_byte = i
-        end
-        px = px + cw
-        i = ni
-    end
-    return best_byte
-end
-
 local function find_hovered_token(mx, my)
     -- Primary: direct token-boundary matching using compute_bounds measurements.
     -- Each token's pixel boundaries were measured by libass itself, so matching
@@ -1738,7 +1682,7 @@ local function extract_px_map(res)
     end
     local last = res.px_map[count]
     dlog('[extract_px_map] Got ' .. count .. ' entries, total_px=' ..
-         string.format('%.1f', last and last[2] or 0) .. ' — using per-line \\an1 mode')
+         string.format('%.1f', last and last[2] or 0))
     return map
 end
 
