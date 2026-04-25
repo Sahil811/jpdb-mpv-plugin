@@ -363,12 +363,13 @@ local SUBTITLE_OVERLAY = {
 
     -- Subtitle background panel
     -- Set bg_enabled=true for a semi-transparent backdrop behind subtitle text.
-    -- bg_style: 'unified' = one panel for all lines (Netflix-style),
-    --           'per_line' = separate rect per line (fitted).
+    -- bg_style: 'contour'  = one connected shape following each line's width (best),
+    --           'unified'  = one rect using widest line's width,
+    --           'per_line' = separate rect per line (can overlap).
     -- bg_radius: corner rounding (0 = sharp corners, higher = more rounded).
     -- Color & alpha come from the active theme (sub_bg_color, sub_bg_alpha).
     bg_enabled    = true,
-    bg_style      = 'per_line', -- 'unified' or 'per_line'
+    bg_style      = 'contour', -- 'contour', 'unified', or 'per_line'
     bg_pad_h      = 18,    -- horizontal padding (px)
     bg_pad_v      = 10,    -- vertical padding (px)
     bg_radius     = 10,    -- corner radius (px)

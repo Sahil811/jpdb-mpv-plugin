@@ -1106,31 +1106,124 @@ local function render_subtitles()
         local pv = SUB_CONF.bg_pad_v or 10
         local r  = SUB_CONF.bg_radius or 10
         local bw = SUB_CONF.bg_border or 1
+        local style = SUB_CONF.bg_style or 'contour'
+        local k  = math.floor(r * 0.55)  -- Bézier handle for circular arcs
 
-        -- Rounded rectangle drawing helper
-        local function draw_rrect(ass, x1, y1, x2, y2, rad)
+        -- Rounded rectangle path (single line or fallback)
+        local function rrect_path(x1, y1, x2, y2, rad)
             if rad > 0 then
-                local k = math.floor(rad * 0.55)
-                ass:append(string.format(
-                    'm %d %d '
-                 .. 'l %d %d b %d %d %d %d %d %d '
+                local ck = math.floor(rad * 0.55)
+                return string.format(
+                    'm %d %d l %d %d b %d %d %d %d %d %d '
                  .. 'l %d %d b %d %d %d %d %d %d '
                  .. 'l %d %d b %d %d %d %d %d %d '
                  .. 'l %d %d b %d %d %d %d %d %d',
                     x1+rad, y1,
-                    x2-rad, y1, x2-rad+k, y1, x2, y1+rad-k, x2, y1+rad,
-                    x2, y2-rad, x2, y2-rad+k, x2-rad+k, y2, x2-rad, y2,
-                    x1+rad, y2, x1+rad-k, y2, x1, y2-rad+k, x1, y2-rad,
-                    x1, y1+rad, x1, y1+rad-k, x1+rad-k, y1, x1+rad, y1
-                ))
+                    x2-rad, y1, x2-rad+ck, y1, x2, y1+rad-ck, x2, y1+rad,
+                    x2, y2-rad, x2, y2-rad+ck, x2-rad+ck, y2, x2-rad, y2,
+                    x1+rad, y2, x1+rad-ck, y2, x1, y2-rad+ck, x1, y2-rad,
+                    x1, y1+rad, x1, y1+rad-ck, x1+rad-ck, y1, x1+rad, y1)
             else
-                ass:append(string.format('m %d %d l %d %d l %d %d l %d %d',
-                    x1, y1, x2, y1, x2, y2, x1, y2))
+                return string.format('m %d %d l %d %d l %d %d l %d %d',
+                    x1, y1, x2, y1, x2, y2, x1, y2)
             end
         end
 
-        if SUB_CONF.bg_style == 'unified' then
-            -- Unified panel: one cohesive rounded rect spanning all lines
+        -- Emit one filled shape + optional border
+        local function emit_shape(path_str)
+            a:new_event()
+            a:append('{\\an7\\pos(0,0)\\bord0\\shad0\\1c' .. DS.sub_bg_color
+                  .. '\\1a' .. DS.sub_bg_alpha .. '\\p1}')
+            a:append(path_str)
+            if bw > 0 then
+                a:new_event()
+                a:append('{\\an7\\pos(0,0)\\bord' .. bw .. '\\shad0\\1c' .. DS.sub_bg_color
+                      .. '\\1a&HFF&\\3c' .. DS.sub_bg_color
+                      .. '\\3a' .. (SUB_CONF.bg_border_alpha or '&HA0&') .. '\\p1}')
+                a:append(path_str)
+            end
+        end
+
+        if style == 'contour' then
+            -- Contour mode: a single connected shape that follows each line's
+            -- individual width. Looks like one cohesive panel but adapts to
+            -- different line lengths — no gaps, no overlap, no uniform width.
+            local n = #subtitle_line_data
+            if n == 1 then
+                local ld = subtitle_line_data[1]
+                emit_shape(rrect_path(
+                    math.floor(ld.actual_x0 - ph), math.floor(ld.y1 - pv),
+                    math.floor(ld.actual_x0 + ld.actual_total + ph), math.floor(ld.y2 + pv), r))
+            else
+                -- Compute padded edges for each line
+                local edges = {}
+                for i, ld in ipairs(subtitle_line_data) do
+                    edges[i] = {
+                        xl = math.floor(ld.actual_x0 - ph),
+                        xr = math.floor(ld.actual_x0 + ld.actual_total + ph),
+                        yt = math.floor(ld.y1 - pv),
+                        yb = math.floor(ld.y2 + pv),
+                    }
+                end
+                -- Transition y between adjacent lines (midpoint of gap)
+                local ty = {}
+                for i = 1, n - 1 do
+                    ty[i] = math.floor((edges[i].yb + edges[i+1].yt) / 2)
+                end
+
+                local pts = {}
+                local function pt(fmt, ...) pts[#pts+1] = string.format(fmt, ...) end
+
+                -- ── TOP EDGE (first line) ──
+                local e1 = edges[1]
+                pt('m %d %d', e1.xl + r, e1.yt)
+                pt('l %d %d', e1.xr - r, e1.yt)
+                pt('b %d %d %d %d %d %d', e1.xr-r+k, e1.yt, e1.xr, e1.yt+r-k, e1.xr, e1.yt+r)
+
+                -- ── RIGHT SIDE (top → bottom) ──
+                for i = 1, n do
+                    local e = edges[i]
+                    if i > 1 then
+                        -- Step from previous line's right edge to this line's right edge
+                        pt('l %d %d', edges[i-1].xr, ty[i-1])
+                        pt('l %d %d', e.xr, ty[i-1])
+                    end
+                    if i < n then
+                        pt('l %d %d', e.xr, ty[i])
+                    else
+                        -- Bottom-right corner of last line
+                        pt('l %d %d', e.xr, e.yb - r)
+                        pt('b %d %d %d %d %d %d', e.xr, e.yb-r+k, e.xr-r+k, e.yb, e.xr-r, e.yb)
+                    end
+                end
+
+                -- ── BOTTOM EDGE (last line) ──
+                local en = edges[n]
+                pt('l %d %d', en.xl + r, en.yb)
+                pt('b %d %d %d %d %d %d', en.xl+r-k, en.yb, en.xl, en.yb-r+k, en.xl, en.yb-r)
+
+                -- ── LEFT SIDE (bottom → top) ──
+                for i = n, 1, -1 do
+                    local e = edges[i]
+                    if i < n then
+                        -- Step from next line's left edge to this line's left edge
+                        pt('l %d %d', edges[i+1].xl, ty[i])
+                        pt('l %d %d', e.xl, ty[i])
+                    end
+                    if i > 1 then
+                        pt('l %d %d', e.xl, ty[i-1])
+                    else
+                        -- Top-left corner of first line
+                        pt('l %d %d', e.xl, e.yt + r)
+                        pt('b %d %d %d %d %d %d', e.xl, e.yt+r-k, e.xl+r-k, e.yt, e.xl+r, e.yt)
+                    end
+                end
+
+                emit_shape(table.concat(pts, ' '))
+            end
+
+        elseif style == 'unified' then
+            -- Unified: one bounding rect spanning all lines (same width for all)
             local min_x, max_x = math.huge, -math.huge
             local min_y, max_y = math.huge, -math.huge
             for _, ld in ipairs(subtitle_line_data) do
@@ -1141,45 +1234,15 @@ local function render_subtitles()
                 if ld.y1 < min_y then min_y = ld.y1 end
                 if ld.y2 > max_y then max_y = ld.y2 end
             end
-            local bx1 = math.floor(min_x - ph)
-            local bx2 = math.floor(max_x + ph)
-            local by1 = math.floor(min_y - pv)
-            local by2 = math.floor(max_y + pv)
+            emit_shape(rrect_path(
+                math.floor(min_x - ph), math.floor(min_y - pv),
+                math.floor(max_x + ph), math.floor(max_y + pv), r))
 
-            -- Fill
-            a:new_event()
-            a:append('{\\an7\\pos(0,0)\\bord0\\shad0\\1c' .. DS.sub_bg_color
-                  .. '\\1a' .. DS.sub_bg_alpha .. '\\p1}')
-            draw_rrect(a, bx1, by1, bx2, by2, r)
-
-            -- Subtle edge border for depth
-            if bw > 0 then
-                a:new_event()
-                a:append('{\\an7\\pos(0,0)\\bord' .. bw .. '\\shad0\\1c' .. DS.sub_bg_color
-                      .. '\\1a&HFF&\\3c' .. DS.sub_bg_color
-                      .. '\\3a' .. (SUB_CONF.bg_border_alpha or '&HA0&') .. '\\p1}')
-                draw_rrect(a, bx1, by1, bx2, by2, r)
-            end
-        else
-            -- Per-line mode: individual fitted rectangles
+        else  -- 'per_line'
             for _, ld in ipairs(subtitle_line_data) do
-                local bx1 = math.floor(ld.actual_x0 - ph)
-                local bx2 = math.floor(ld.actual_x0 + ld.actual_total + ph)
-                local by1 = math.floor(ld.y1 - pv)
-                local by2 = math.floor(ld.y2 + pv)
-
-                a:new_event()
-                a:append('{\\an7\\pos(0,0)\\bord0\\shad0\\1c' .. DS.sub_bg_color
-                      .. '\\1a' .. DS.sub_bg_alpha .. '\\p1}')
-                draw_rrect(a, bx1, by1, bx2, by2, r)
-
-                if bw > 0 then
-                    a:new_event()
-                    a:append('{\\an7\\pos(0,0)\\bord' .. bw .. '\\shad0\\1c' .. DS.sub_bg_color
-                          .. '\\1a&HFF&\\3c' .. DS.sub_bg_color
-                          .. '\\3a' .. (SUB_CONF.bg_border_alpha or '&HA0&') .. '\\p1}')
-                    draw_rrect(a, bx1, by1, bx2, by2, r)
-                end
+                emit_shape(rrect_path(
+                    math.floor(ld.actual_x0 - ph), math.floor(ld.y1 - pv),
+                    math.floor(ld.actual_x0 + ld.actual_total + ph), math.floor(ld.y2 + pv), r))
             end
         end
     end
