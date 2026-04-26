@@ -2055,6 +2055,36 @@ local function do_set_flag(card, flag, state)
 end
 
 local last_audio_time = 0
+local is_windows = package.config:sub(1, 1) == '\\'
+
+local function launch_audio_player(url)
+    if is_windows then
+        local ps = table.concat({
+            "Start-Process -FilePath 'mpv' -WindowStyle Hidden -ArgumentList @(",
+            "'--no-video',",
+            "'--force-window=no',",
+            "'--audio-display=no',",
+            "'--really-quiet',",
+            "'--volume=70',",
+            string.format("'%s'", url:gsub("'", "''")),
+            ")",
+        }, ' ')
+        mp.command_native_async({
+            name = 'subprocess',
+            args = {'powershell', '-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps},
+            detach = true,
+            playback_only = false
+        }, function() end)
+        return
+    end
+
+    mp.command_native_async({
+        name = 'subprocess',
+        args = {'mpv', '--no-video', '--force-window=no', '--audio-display=no', '--really-quiet', '--volume=70', url},
+        detach = true,
+        playback_only = false
+    }, function() end)
+end
 
 local function do_play_audio(card)
     local now = mp.get_time()
@@ -2066,12 +2096,7 @@ local function do_play_audio(card)
         local sp = url_encode(card.spelling or '')
         local rd = url_encode(card.reading or '')
         local url = SERVER_URL .. '/word-audio?vid=' .. tostring(vid) .. '&spelling=' .. sp .. '&reading=' .. rd
-        mp.command_native_async({
-            name = 'subprocess',
-            args = {'mpv', '--no-video', '--really-quiet', '--volume=70', url},
-            detach = true,
-            playback_only = false
-        }, function() end)
+        launch_audio_player(url)
         show_popup_toast('🔊 Playing audio: ' .. card.reading, true)
     else
         show_popup_toast('✕ No audio available', false)
