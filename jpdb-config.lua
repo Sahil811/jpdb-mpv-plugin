@@ -336,7 +336,7 @@ end
 -- ======== SUBTITLE OVERLAY SETTINGS ========
 local SUBTITLE_OVERLAY = {
     pos_y_offset = 90,
-    font_size    = 60,  
+    font_size    = 69,  
 
     -- Glyph width tracking for hit detection (3 width classes).
     -- These values are calibrated for Yu Gothic UI at font_size=60.
@@ -351,7 +351,7 @@ local SUBTITLE_OVERLAY = {
     -- Decrease if hover regions are too wide (edges inaccurate).
     width_scale  = 1.0,
 
-    line_h       = 72,
+    line_h       = 83,
 
     -- Border width used in ASS rendering (\bordN) — hit regions expand by this
     bord_w       = 2,
@@ -407,7 +407,7 @@ return {
     SERVER_URL  = 'http://127.0.0.1:9726',
     
     -- Change the font family used for both subtitles and popup UI
-    FONT_FAMILY = 'Yu Gothic UI',
+    FONT_FAMILY = 'Malgun Gothic Semilight',
 
     DS = DS,
     SUBTITLE_OVERLAY = SUBTITLE_OVERLAY,
