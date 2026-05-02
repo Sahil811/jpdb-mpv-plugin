@@ -353,6 +353,10 @@ local SUBTITLE_OVERLAY = {
 
     line_h       = 83,
 
+    -- Note for future updates regarding subtitle border width:
+    -- To increase or change the subtitle text border width, update `bord_w` below.
+    -- `main.lua` uses this variable dynamically rather than hardcoding it:
+    -- e.g., local tag_prefix = '\\fn' .. FONT_FAMILY .. '\\fsp0\\bord' .. BORD_W .. '\\shad1\\b0'
     -- Border width used in ASS rendering (\bordN) — hit regions expand by this
     bord_w       = 4,
 
