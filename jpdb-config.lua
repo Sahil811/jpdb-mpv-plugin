@@ -354,7 +354,7 @@ local SUBTITLE_OVERLAY = {
     line_h       = 83,
 
     -- Border width used in ASS rendering (\bordN) — hit regions expand by this
-    bord_w       = 2,
+    bord_w       = 4,
 
     -- Vertical hit region calibration (fractions of font_size)
     ascent_ratio  = 0.88,  -- portion of font_size above baseline

@@ -937,7 +937,7 @@ local function render_subtitles()
     local layout = subtitle_layout()
     local sub_x  = math.floor(osd_w / 2)
     -- ASS tag: explicit font + zero letter spacing for predictable glyph widths
-    local tag_prefix = '\\fn' .. FONT_FAMILY .. '\\fsp0\\bord2\\shad1\\b0'
+    local tag_prefix = '\\fn' .. FONT_FAMILY .. '\\fsp0\\bord' .. BORD_W .. '\\shad1\\b0'
 
     -- Pre-wrap: split lines that are wider than the screen so our layout model
     -- (background rects, hit regions) matches what libass would render.
