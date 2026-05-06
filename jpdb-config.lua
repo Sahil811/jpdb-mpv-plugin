@@ -408,7 +408,7 @@ return {
     -- Leave false in production — no file is created, dlog() is a no-op.
     DEBUG_LOG = false,
 
-    SERVER_URL  = 'http://127.0.0.1:9726',
+    SERVER_URL  = 'http://127.0.0.1:9900',
     
     -- Change the font family used for both subtitles and popup UI
     FONT_FAMILY = 'Malgun Gothic Semilight',
