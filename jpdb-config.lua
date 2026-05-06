@@ -335,7 +335,7 @@ end
 
 -- ======== SUBTITLE OVERLAY SETTINGS ========
 local SUBTITLE_OVERLAY = {
-    pos_y_offset = 90,
+    pos_y_offset = 120,
     font_size    = 69,  
 
     -- Glyph width tracking for hit detection (3 width classes).
